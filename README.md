@@ -57,7 +57,8 @@ FuseDB explores a different design: leaf-local immutable segments with local mer
 - immutable leaf-local segments
 - local merge within a leaf instead of global LSM-style compaction
 - leaf split on overflow or hot-range pressure
-- update/merge semantics in the in-memory buffer
+- in-buffer update merge for mergeable mutations
+- buffer-to-segment merge for leaf-local materialization
 - per-leaf seqno for visibility and merge ordering
 
 ## Current status
