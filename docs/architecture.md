@@ -83,6 +83,7 @@ At a high level, FuseDB consists of:
 The routing tree maps keys to leaves and supports ordered leaf traversal for range scans.
 
 ---
+
 ## 6. Data Model
 
 FuseDB stores opaque byte keys and opaque byte values.
@@ -153,6 +154,7 @@ The per-leaf seqno is incremented on each accepted mutation.
 
 ### 7.5 Merge path
 Buffer-to-segment merge is triggered by the scheduler. The merge reads the current buffer state and produces a new immutable segment. The new segment replaces the previous segment atomically. After a successful merge, the buffer is cleared and WAL records up to this merge point may be truncated.
+
 ---
 
 ### 7.6 Split-merge path
@@ -168,6 +170,7 @@ Split-merge proceeds as follows:
 This means the buffer is never split directly — it is first merged with the segment, and the resulting materialized state is then divided by key range into the new segments.
 
 --- 
+
 ## 8. Scheduler
 The scheduler is responsible for triggering merge and split-merge operations across leaves. Its primary goal is to keep foreground write latency predictable by avoiding coordinated IO spikes.
 
