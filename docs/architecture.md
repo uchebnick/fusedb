@@ -105,3 +105,38 @@ Mergeable update types may be represented in buffered form as coalesced per-key 
 ---
 
 ## 7. Leaf Model
+A leaf is the primary unit of mutation, storage, maintenance, and split in FuseDB.
+Each leaf owns:
+
+- a mutable in-memory buffer
+- at most one immutable leaf-local segment on disk
+- a per-leaf seqno counter
+> [!NOTE]
+> The buffer and segment serve different roles.
+> 
+> The buffer is an operation log — it records mutations as typed operations (puts, deletes, increments, accumulators) rather than as materialized values.
+> 
+> The segment is a materialized state snapshot — it stores the resolved value for each key as of the last buffer-to-segment merge.
+
+7.1 Buffer
+The buffer is a sorted map from key to the latest known operation for that key. Sorting preserves key order within the leaf and supports bounded range scans.
+Each accepted mutation increments the per-leaf seqno. For mergeable operation types (counters, quotas, accumulators), the buffer coalesces multiple updates into a single per-key entry. Deletes are represented as tombstones.
+
+7.2 Segment
+A segment is an immutable, leaf-local materialized snapshot. Each leaf holds at most one active segment at any time. Segment contents are ordered by key and represent fully resolved values — no pending operations remain in the segment.
+
+### 7.3 Read Path
+A point read on a leaf resolves the key by consulting the buffer first, then the segment.
+The buffer stores mutations as operations, not as materialized values. The segment stores materialized state. Read resolution follows the operation type found in the buffer:
+
+Tombstone (Delete) - return not found immediately, without consulting the segment.
+Put — return the value from the buffer entry directly.
+Mergeable operation (e.g. increment, accumulator) — the buffer entry cannot be resolved alone. Fall through to the segment to read the base value, then apply the buffered operation on top to produce the final result.
+No buffer entry — fall through to the segment and return the segment value, or not found if absent.
+
+### 7.4 Write Path
+A write is accepted by the leaf as a typed operation: Put, Delete, or a mergeable operation type.
+Before the buffer is updated, the operation is appended to the WAL. Only after the WAL write is confirmed is the buffer entry updated. This ordering ensures the mutation is durable before it becomes visible within the leaf.
+
+The buffer entry for the key is replaced with the incoming operation. For mergeable operation types, the incoming operation is coalesced with the existing buffer entry if one is present, producing a single updated entry rather than accumulating a list of individual records.
+The per-leaf seqno is incremented on each accepted mutation.
