@@ -67,6 +67,11 @@ FuseDB explores a different design: leaf-local immutable segments with local mer
 - architecture and workload model are being refined
 - not production-ready
 
+## Design docs
+
+- [Architecture](./docs/architecture.md)
+- [Compression](./docs/compression.md)
+
 ## Roadmap
 
 - [ ] Core engine
