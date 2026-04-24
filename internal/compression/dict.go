@@ -2,9 +2,12 @@ package compression
 
 import (
 	"bytes"
+	"container/list"
 	"errors"
 	"fmt"
 	"sync"
+
+	"fusedb/internal/disk"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -16,12 +19,17 @@ const (
 )
 
 var (
-	ErrNilDictionary       = errors.New("compression: nil dictionary")
-	ErrEmptyDictionary     = errors.New("compression: empty dictionary")
-	ErrZeroDictionaryID    = errors.New("compression: dictionary id must be non-zero")
-	ErrNoSamples           = errors.New("compression: no samples provided")
-	ErrDictionaryNotFound  = errors.New("compression: dictionary not found")
-	ErrDuplicateDictionary = errors.New("compression: duplicate dictionary id")
+	ErrNilDictionary        = errors.New("compression: nil dictionary")
+	ErrEmptyDictionary      = errors.New("compression: empty dictionary")
+	ErrZeroDictionaryID     = errors.New("compression: dictionary id must be non-zero")
+	ErrNoSamples            = errors.New("compression: no samples provided")
+	ErrBuildDictionaryPanic = errors.New("compression: zstd dictionary build panic")
+	ErrDictionaryNotFound   = errors.New("compression: dictionary not found")
+	ErrDuplicateDictionary  = errors.New("compression: duplicate dictionary id")
+	ErrDictionaryClosed     = errors.New("compression: dictionary closed")
+	ErrNilDictionaryFS      = errors.New("compression: nil dictionary filesystem")
+	ErrDictionaryStorage    = errors.New("compression: dictionary registry has no storage")
+	ErrDictionaryIDMismatch = errors.New("compression: dictionary id mismatch")
 )
 
 // Dictionary is immutable runtime wrapper around one zstd dictionary.
@@ -29,6 +37,7 @@ var (
 // Same dictionary bytes must be used for both compression and decompression.
 // Dictionary is safe for concurrent block-level Compress/Decompress calls.
 type Dictionary struct {
+	mu      sync.Mutex
 	id      uint32
 	raw     []byte
 	level   int
@@ -47,8 +56,18 @@ type TrainOptions struct {
 
 // Registry stores loaded dictionaries by ID.
 type Registry struct {
-	mu    sync.RWMutex
-	dicts map[uint32]*Dictionary
+	mu     sync.RWMutex
+	loadMu sync.Mutex
+	dicts  map[uint32]*registryEntry
+	lru    *list.List
+	limit  int
+	fs     disk.FS
+	dir    string
+}
+
+type registryEntry struct {
+	dict *Dictionary
+	elem *list.Element
 }
 
 // NewDictionary builds reusable zstd dictionary codec from raw dictionary bytes.
@@ -101,7 +120,7 @@ func NewDictionaryLevel(id uint32, raw []byte, level int) (*Dictionary, error) {
 }
 
 // TrainDictionary trains zstd dictionary bytes from representative samples.
-func TrainDictionary(opts TrainOptions) ([]byte, error) {
+func TrainDictionary(opts TrainOptions) (raw []byte, err error) {
 	if opts.ID == 0 {
 		return nil, ErrZeroDictionaryID
 	}
@@ -127,7 +146,14 @@ func TrainDictionary(opts TrainOptions) ([]byte, error) {
 		level = zstd.EncoderLevelFromZstd(DefaultZstdLevel)
 	}
 
-	raw, err := zstd.BuildDict(zstd.BuildDictOptions{
+	defer func() {
+		if r := recover(); r != nil {
+			raw = nil
+			err = fmt.Errorf("%w: %v", ErrBuildDictionaryPanic, r)
+		}
+	}()
+
+	raw, err = zstd.BuildDict(zstd.BuildDictOptions{
 		ID:         opts.ID,
 		Contents:   samples,
 		History:    history,
@@ -175,6 +201,11 @@ func (d *Dictionary) CompressInto(dst, src []byte) ([]byte, error) {
 	if d == nil {
 		return nil, ErrNilDictionary
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.encoder == nil {
+		return nil, ErrDictionaryClosed
+	}
 	return d.encoder.EncodeAll(src, dst[:0]), nil
 }
 
@@ -188,6 +219,11 @@ func (d *Dictionary) DecompressInto(dst, src []byte) ([]byte, error) {
 	if d == nil {
 		return nil, ErrNilDictionary
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.decoder == nil {
+		return nil, ErrDictionaryClosed
+	}
 	out, err := d.decoder.DecodeAll(src, dst[:0])
 	if err != nil {
 		return nil, fmt.Errorf("compression: decode zstd block: %w", err)
@@ -200,6 +236,8 @@ func (d *Dictionary) Close() error {
 	if d == nil {
 		return nil
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	var errs []error
 	if d.encoder != nil {
@@ -222,9 +260,39 @@ func (d *Dictionary) Close() error {
 
 // NewRegistry creates empty dictionary registry.
 func NewRegistry() *Registry {
-	return &Registry{
-		dicts: make(map[uint32]*Dictionary),
+	return newRegistry(0)
+}
+
+// NewLRURegistry creates memory-only dictionary registry with cache limit.
+//
+// limit <= 0 means unlimited. Eviction removes dictionary only from registry;
+// active readers that already hold the dictionary keep working.
+func NewLRURegistry(limit int) *Registry {
+	return newRegistry(limit)
+}
+
+// NewPersistentRegistry creates registry backed by dictionary files.
+//
+// Loaded dictionaries stay cached in memory. Disk is used only for Save and
+// first lookup after restart/recovery.
+func NewPersistentRegistry(fs disk.FS, dir string, limit ...int) (*Registry, error) {
+	if fs == nil {
+		return nil, ErrNilDictionaryFS
 	}
+	if dir != "" {
+		if err := fs.MkdirAll(dir); err != nil {
+			return nil, err
+		}
+	}
+
+	cacheLimit := 0
+	if len(limit) > 0 {
+		cacheLimit = limit[0]
+	}
+	registry := newRegistry(cacheLimit)
+	registry.fs = fs
+	registry.dir = dir
+	return registry, nil
 }
 
 // Add registers dictionary. Existing IDs are rejected.
@@ -239,8 +307,81 @@ func (r *Registry) Add(dict *Dictionary) error {
 	if _, exists := r.dicts[dict.id]; exists {
 		return fmt.Errorf("%w: %d", ErrDuplicateDictionary, dict.id)
 	}
-	r.dicts[dict.id] = dict
+	r.storeLocked(dict)
 	return nil
+}
+
+// Save persists dictionary and keeps it in the registry cache.
+func (r *Registry) Save(dict *Dictionary) error {
+	if dict == nil {
+		return ErrNilDictionary
+	}
+	if !r.hasStorage() {
+		return ErrDictionaryStorage
+	}
+
+	r.loadMu.Lock()
+	defer r.loadMu.Unlock()
+
+	r.mu.RLock()
+	existing, exists := r.dicts[dict.id]
+	r.mu.RUnlock()
+	if exists && existing.dict != dict {
+		return fmt.Errorf("%w: %d", ErrDuplicateDictionary, dict.id)
+	}
+
+	name := DictionaryFileName(r.dir, dict.ID())
+	if err := SaveDictionary(r.fs, name, dict); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if existing, exists := r.dicts[dict.id]; exists && existing.dict != dict {
+		return fmt.Errorf("%w: %d", ErrDuplicateDictionary, dict.id)
+	}
+	r.storeLocked(dict)
+	return nil
+}
+
+// Load reads dictionary from registry storage and caches it in memory.
+func (r *Registry) Load(id uint32) (*Dictionary, error) {
+	if !r.hasStorage() {
+		return nil, ErrDictionaryStorage
+	}
+
+	if dict, ok := r.Get(id); ok {
+		return dict, nil
+	}
+
+	r.loadMu.Lock()
+	defer r.loadMu.Unlock()
+
+	if dict, ok := r.Get(id); ok {
+		return dict, nil
+	}
+
+	name := DictionaryFileName(r.dir, id)
+	dict, err := LoadDictionary(r.fs, name)
+	if err != nil {
+		return nil, err
+	}
+	if dict.ID() != id {
+		_ = dict.Close()
+		return nil, fmt.Errorf("%w: want %d, got %d", ErrDictionaryIDMismatch, id, dict.ID())
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if existing, exists := r.dicts[id]; exists {
+		_ = dict.Close()
+		r.touchLocked(existing)
+		return existing.dict, nil
+	}
+	r.storeLocked(dict)
+	return dict, nil
 }
 
 // Get returns dictionary by ID.
@@ -249,20 +390,27 @@ func (r *Registry) Get(id uint32) (*Dictionary, bool) {
 		return nil, false
 	}
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	dict, ok := r.dicts[id]
-	return dict, ok
+	entry, ok := r.dicts[id]
+	if !ok {
+		return nil, false
+	}
+	r.touchLocked(entry)
+	return entry.dict, true
 }
 
 // MustGet returns dictionary or error when it is missing.
 func (r *Registry) MustGet(id uint32) (*Dictionary, error) {
 	dict, ok := r.Get(id)
-	if !ok {
-		return nil, fmt.Errorf("%w: %d", ErrDictionaryNotFound, id)
+	if ok {
+		return dict, nil
 	}
-	return dict, nil
+	if r.hasStorage() {
+		return r.Load(id)
+	}
+	return nil, fmt.Errorf("%w: %d", ErrDictionaryNotFound, id)
 }
 
 // Remove deletes dictionary registration.
@@ -273,7 +421,7 @@ func (r *Registry) Remove(id uint32) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.dicts, id)
+	r.removeLocked(id)
 }
 
 // Close releases all registered dictionaries.
@@ -283,14 +431,19 @@ func (r *Registry) Close() error {
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
+
+	dicts := make([]*Dictionary, 0, len(r.dicts))
+	for id, dict := range r.dicts {
+		dicts = append(dicts, dict.dict)
+		r.removeLocked(id)
+	}
+	r.mu.Unlock()
 
 	var errs []error
-	for id, dict := range r.dicts {
+	for _, dict := range dicts {
 		if err := dict.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("compression: close dictionary %d: %w", id, err))
+			errs = append(errs, fmt.Errorf("compression: close dictionary %d: %w", dict.ID(), err))
 		}
-		delete(r.dicts, id)
 	}
 	if len(errs) == 0 {
 		return nil
@@ -342,4 +495,67 @@ func makeHistory(size int, samples [][]byte) []byte {
 		history = append(history, chunk...)
 	}
 	return history
+}
+
+func (r *Registry) hasStorage() bool {
+	return r != nil && r.fs != nil
+}
+
+func newRegistry(limit int) *Registry {
+	if limit < 0 {
+		limit = 0
+	}
+	return &Registry{
+		dicts: make(map[uint32]*registryEntry),
+		lru:   list.New(),
+		limit: limit,
+	}
+}
+
+func (r *Registry) storeLocked(dict *Dictionary) {
+	if existing, exists := r.dicts[dict.id]; exists {
+		existing.dict = dict
+		r.touchLocked(existing)
+		return
+	}
+
+	entry := &registryEntry{
+		dict: dict,
+		elem: r.lru.PushFront(dict.id),
+	}
+	r.dicts[dict.id] = entry
+	r.evictLocked()
+}
+
+func (r *Registry) touchLocked(entry *registryEntry) {
+	if entry == nil || entry.elem == nil {
+		return
+	}
+	r.lru.MoveToFront(entry.elem)
+}
+
+func (r *Registry) evictLocked() {
+	for r.limit > 0 && len(r.dicts) > r.limit {
+		back := r.lru.Back()
+		if back == nil {
+			return
+		}
+		id, ok := back.Value.(uint32)
+		if !ok {
+			r.lru.Remove(back)
+			continue
+		}
+		r.removeLocked(id)
+	}
+}
+
+func (r *Registry) removeLocked(id uint32) {
+	entry, exists := r.dicts[id]
+	if !exists {
+		return
+	}
+	if entry.elem != nil {
+		r.lru.Remove(entry.elem)
+	}
+	delete(r.dicts, id)
 }
