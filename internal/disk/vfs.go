@@ -11,6 +11,7 @@ type File interface {
 	io.Reader
 	io.ReaderAt
 	io.Writer
+	io.WriterAt
 	io.Closer
 	Sync() error
 	Stat() (os.FileInfo, error)
@@ -36,6 +37,9 @@ type FS interface {
 
 	// Rename renames oldname to newname atomically where possible.
 	Rename(oldname, newname string) error
+
+	// SyncDir flushes directory metadata such as file create/remove/rename.
+	SyncDir(dir string) error
 
 	// MkdirAll creates the directory and all parents.
 	MkdirAll(dir string) error
