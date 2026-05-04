@@ -1,85 +1,99 @@
 # FuseDB
+
 [![Language: Go](https://img.shields.io/badge/language-Go-00ADD8)](#)
-[![Status: Research](https://img.shields.io/badge/status-research-orange)](#)
+[![Status: In development](https://img.shields.io/badge/status-in_development-blue)](#)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-## What it is
 
-FuseDB is an embedded KV engine for small hot mutable state, optimized for predictable tail latency on update-heavy workloads.
+FuseDB is an embedded key-value engine for small hot mutable state. It is built
+around leaf-local mutation buffers, immutable segments, and local merge instead
+of global LSM-style compaction.
 
-It is designed for workloads such as rate limiting, counters, sessions, quotas, and other small metadata/state-serving use cases where point reads and point updates dominate.
+The target workloads are rate limits, counters, sessions, quotas, and other
+metadata/state-serving paths where point reads and frequent point updates are
+more important than large scans.
 
-> [!IMPORTANT]
-> FuseDB is currently in the research stage. The architecture, APIs, and on-disk format are expected to change.
+## Design
 
-## Why this exists
+FuseDB routes keys into leaves. A leaf owns recent mutations in memory and a
+materialized immutable segment on disk.
 
-### Motivation
+Core pieces:
 
-Existing storage engine architectures make different trade-offs:
+- `internal/skiplist`: lock-free ordered mutation index for `Put`, `Delete`,
+  and `Inc` operations.
+- `internal/leaf`: leaf-local buffer and immutable operation snapshots for
+  future merge work.
+- `internal/segment`: immutable segment writer/reader with blocks, index,
+  bloom filter, footer, iterators, and crash-safe finalize/abort.
+- `internal/compression`: Zstd dictionary compression, persistent dictionary
+  files, LRU registry, and pretraining helpers.
+- `internal/disk`: filesystem abstraction used by segment and compression
+  persistence.
 
-#### LSM trees
-- often provide strong write throughput
-- can suffer from latency instability under compaction pressure
-- may rewrite data multiple times across levels
-- can accumulate compaction debt that affects tail latency
+## Read And Write Model
 
-#### B+ trees
-- provide strong ordered access and efficient range traversal
-- may suffer from checkpoint and dirty-page pressure under heavy update workloads
-- can experience cache churn and contention on hot paths
+Writes become typed operations and enter the leaf buffer first. Existing
+buffered operations may coalesce, for example repeated increments on the same
+key.
 
-FuseDB explores a different design: leaf-local immutable segments with local merge, aiming to reduce global write amplification and improve p99 predictability for small hot-state workloads.
+Reads check the buffer before the segment:
 
-## Target workloads
+1. `Delete` means not found.
+2. `Put` returns the buffered value.
+3. `Inc` is resolved against the materialized base value.
+4. Missing buffer key falls through to the immutable segment.
 
-### Optimized for
-- small keys and values
-- point reads
-- point updates
-- overwrite-heavy workloads
-- counters and increments
-- hot keys and hot ranges
-- bounded or secondary range scans
+Merge freezes the current buffer operations into an immutable snapshot, lets new
+writes continue in a fresh buffer, and builds a new segment from:
 
-### Not optimized for
-- large blobs
-- analytical scans
-- general-purpose OLTP replacement
-- distributed workloads
+```text
+old segment entries + frozen buffer operations -> new immutable segment
+```
 
-> [!WARNING]
-> FuseDB is not intended to be a general-purpose replacement for RocksDB, B+ tree engines, or full OLTP databases.
+## Current Capabilities
 
-## Core ideas
+- Concurrent skiplist mutation buffer with zero-copy and safe-copy APIs.
+- Buffer freeze into read-only operation snapshots for merge.
+- Segment writer/reader with point lookup and ordered iterator.
+- Segment-wide compression mode with persistent dictionary registry.
+- Leaf buffer snapshots let merge read frozen operations while new writes
+  continue in a fresh buffer.
+- In-memory and OS-backed filesystem implementations for tests and runtime.
 
-- tree-based key-range routing
-- mutable in-memory buffer per leaf
-- immutable leaf-local segments
-- local merge within a leaf instead of global LSM-style compaction
-- leaf split on overflow or hot-range pressure
-- in-buffer update merge for mergeable mutations
-- buffer-to-segment merge for leaf-local materialization
-- per-leaf seqno for visibility and merge ordering
+## Not A Fit
 
-## Current status
+FuseDB is not intended for:
 
-- research stage
-- architecture and workload model are being refined
-- not production-ready
+- large blobs;
+- analytics-heavy scans;
+- distributed storage;
+- SQL or full OLTP workloads.
 
-## Design docs
+## Development
 
-- [Architecture](./docs/architecture.md)
-- [Compression](./docs/compression.md)
+Useful checks:
+
+```sh
+go test ./internal/skiplist
+go test -race ./internal/skiplist
+go test ./internal/segment
+go test ./internal/leaf
+```
+
+`go test ./...` may include unfinished package stubs while modules are still
+being wired together.
 
 ## Roadmap
 
-- [ ] Core engine
-  - [ ] in-memory buffer with update merge
-  - [ ] immutable leaf segment
-  - [ ] local merge between buffer and segment
-  - [ ] basic scheduler
-- [ ] Leaf split
-- [ ] WAL and recovery
-- [ ] First benchmarks
-- [ ] Tuning, merge policy, and scheduler optimization
+- Implement leaf-level read/write orchestration over buffer + segment.
+- Implement buffer/segment merge, including resolver-backed `Inc`.
+- Add WAL and recovery metadata for segment replacement.
+- Add scheduler policies for merge, split, and IO budgeting.
+- Add leaf split plus routing-tree persistence.
+- Add end-to-end latency and write-amplification benchmarks.
+
+## Docs
+
+- [Architecture](./docs/architecture.md)
+- [Compression](./docs/compression.md)
+- [Skiplist module](./internal/skiplist/README.md)

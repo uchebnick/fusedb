@@ -29,30 +29,19 @@ The skiplist module does not own WAL, leaf routing, segment IO, or recovery.
 
 ## Public API
 
-Convenience API:
-
-```go
-list.Put(key, value)
-list.Delete(key)
-list.Inc(key, delta)
-value, ok := list.Get(key)
-```
-
-Operation-aware API:
-
 ```go
 list.Apply(key, op)
 op, ok := list.Read(key)
 op, ok := list.SafeRead(key)
+n := list.Len()
+bytes := list.DataBytes()
 for key, op := range list.Iter() {}
 for key, op := range list.SafeIter() {}
 ```
 
-Use `Put`, `Delete`, and `Inc` when the caller does not need to construct `Op`
-directly.
-
-Use `Apply`, `Read`, and `Iter` for lower-level internal code such as buffer and
-merge logic.
+The skiplist API is intentionally operation-aware. Higher-level modules such as
+`internal/leaf` provide convenience methods like `Put`, `Delete`, `Inc`, and
+value-oriented reads when they need them.
 
 ## Operation Model
 
@@ -79,7 +68,7 @@ Rules:
 - `NewInc` creates an owned varint buffer
 - `Read` and `Iter` return zero-copy views
 - callers must not mutate `Op.Data` returned by `Read` or `Iter`
-- `SafeRead`, `SafeIter`, and `Get` return owned copies
+- `SafeRead` and `SafeIter` return owned copies
 
 This split keeps hot internal paths fast while preserving safe APIs for callers
 that need ownership.
@@ -90,13 +79,14 @@ The skiplist is designed for concurrent internal use under the module contract.
 
 Important invariants:
 
-- node links are `atomic.Pointer[Node]`
+- node links are atomic pointers
 - existing-key values are `atomic.Pointer[Op]`
 - level 0 publishes node existence
 - upper levels are acceleration links
 - nodes are not physically removed
 - delete is a tombstone operation
 - `Len` counts unique published nodes, not live materialized values
+- `DataBytes` tracks the current total size of `Op.Data` payloads
 
 Insert flow:
 
@@ -180,6 +170,8 @@ Notes:
 
 - `Read` and `Iter` are zero-copy view APIs, so they do not allocate.
 - `SafeIter` allocates once per yielded entry because it copies `Op.Data`.
+- `DataBytes` is exact for operation payload bytes, but does not include keys,
+  node structs, or skiplist pointer overhead.
 - Full iteration over 64K entries is roughly `2.4 ns/entry`.
 - point-read hit cost depends on target-key position and tower distribution.
 - `ReadHitRotating64K` rotates across 1024 keys and is a better average-hit
@@ -198,7 +190,7 @@ go test -race ./internal/skiplist
 The race tests cover:
 
 - concurrent inserts on different keys
-- mixed `Put`, `Inc`, `Delete`, and `SafeRead`
+- mixed `Apply(NewPut)`, `Apply(NewInc)`, `Apply(NewDelete)`, and `SafeRead`
 - concurrent reads while incrementing one hot key
 - iteration while writers publish new nodes
 - safe API ownership behavior
