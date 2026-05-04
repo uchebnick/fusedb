@@ -3,6 +3,7 @@ package segment
 import (
 	"bytes"
 	"errors"
+	"os"
 	"testing"
 
 	"fusedb/internal/compression"
@@ -278,6 +279,67 @@ func TestNewSegmentRejectsExistingFinalFile(t *testing.T) {
 	})
 	if !errors.Is(err, ErrSegmentFileExists) {
 		t.Fatalf("new segment with existing final file = %v, want %v", err, ErrSegmentFileExists)
+	}
+}
+
+func TestSegmentAbortRemovesTempFile(t *testing.T) {
+	fs := disk.NewMemFS()
+	segment, err := NewSegment(Options{
+		FS:        fs,
+		Dir:       "segments",
+		SegmentID: 55,
+		Version:   1,
+	})
+	if err != nil {
+		t.Fatalf("new segment: %v", err)
+	}
+	if err := segment.AppendKV([]byte("alpha"), []byte("1")); err != nil {
+		t.Fatalf("append alpha: %v", err)
+	}
+
+	tempPath := SegmentTempFileName("segments", 55, 1)
+	if _, err := fs.Stat(tempPath); err != nil {
+		t.Fatalf("expected temp file before abort: %v", err)
+	}
+	if err := segment.Abort(); err != nil {
+		t.Fatalf("abort segment: %v", err)
+	}
+	if _, err := fs.Stat(tempPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temp file after abort = %v, want not exist", err)
+	}
+	if err := segment.Abort(); err != nil {
+		t.Fatalf("second abort should be idempotent: %v", err)
+	}
+	if err := segment.AppendKV([]byte("beta"), []byte("2")); err != ErrSegmentAborted {
+		t.Fatalf("append after abort = %v, want %v", err, ErrSegmentAborted)
+	}
+	if err := segment.Freeze(); err != ErrSegmentAborted {
+		t.Fatalf("freeze after abort = %v, want %v", err, ErrSegmentAborted)
+	}
+}
+
+func TestSegmentAbortFrozenSegmentFails(t *testing.T) {
+	fs := disk.NewMemFS()
+	segment, err := NewSegment(Options{
+		FS:        fs,
+		Dir:       "segments",
+		SegmentID: 56,
+		Version:   1,
+	})
+	if err != nil {
+		t.Fatalf("new segment: %v", err)
+	}
+	if err := segment.AppendKV([]byte("alpha"), []byte("1")); err != nil {
+		t.Fatalf("append alpha: %v", err)
+	}
+	if err := segment.Freeze(); err != nil {
+		t.Fatalf("freeze segment: %v", err)
+	}
+	if err := segment.Abort(); err != ErrSegmentFrozen {
+		t.Fatalf("abort frozen segment = %v, want %v", err, ErrSegmentFrozen)
+	}
+	if _, err := fs.Stat(segment.Path()); err != nil {
+		t.Fatalf("final file should remain after abort attempt: %v", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package segment
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"fusedb/internal/compression"
@@ -188,6 +189,7 @@ func TestOpenReaderCompressed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open reader: %v", err)
 	}
+	t.Cleanup(func() { _ = reader.Close() })
 
 	value, ok, err := reader.Get([]byte("omega"))
 	if err != nil {
@@ -248,6 +250,7 @@ func TestReaderIteratorCompressed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open reader: %v", err)
 	}
+	t.Cleanup(func() { _ = reader.Close() })
 
 	it := reader.NewIterator()
 	defer it.Close()
@@ -316,6 +319,7 @@ func TestOpenReaderCompressedLoadsDictionaryFromPersistentRegistry(t *testing.T)
 	if err != nil {
 		t.Fatalf("open reader: %v", err)
 	}
+	t.Cleanup(func() { _ = reader.Close() })
 
 	value, ok, err := reader.Get([]byte("omega"))
 	if err != nil {
@@ -359,5 +363,61 @@ func TestReaderCompressedRequiresRegistry(t *testing.T) {
 
 	if _, err := NewReader(segment, nil); err != ErrMissingDictionaryRegistry {
 		t.Fatalf("new reader without registry = %v, want %v", err, ErrMissingDictionaryRegistry)
+	}
+}
+
+func TestReaderCloseReleasesReader(t *testing.T) {
+	fs := disk.NewMemFS()
+	segment, err := NewSegment(Options{
+		FS:        fs,
+		Dir:       "segments",
+		SegmentID: 307,
+		Version:   1,
+	})
+	if err != nil {
+		t.Fatalf("new segment: %v", err)
+	}
+	if err := segment.AppendKV([]byte("alpha"), []byte("1")); err != nil {
+		t.Fatalf("append alpha: %v", err)
+	}
+	if err := segment.Freeze(); err != nil {
+		t.Fatalf("freeze segment: %v", err)
+	}
+
+	reader, err := OpenReader(fs, segment.Path(), nil)
+	if err != nil {
+		t.Fatalf("open reader: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close reader: %v", err)
+	}
+	if _, _, err := reader.Get([]byte("alpha")); err != ErrNilSegment {
+		t.Fatalf("get after close = %v, want %v", err, ErrNilSegment)
+	}
+}
+
+func TestReaderRequiresOpenFile(t *testing.T) {
+	fs := disk.NewMemFS()
+	segment, err := NewSegment(Options{
+		FS:        fs,
+		Dir:       "segments",
+		SegmentID: 308,
+		Version:   1,
+	})
+	if err != nil {
+		t.Fatalf("new segment: %v", err)
+	}
+	if err := segment.AppendKV([]byte("alpha"), []byte("1")); err != nil {
+		t.Fatalf("append alpha: %v", err)
+	}
+	if err := segment.Freeze(); err != nil {
+		t.Fatalf("freeze segment: %v", err)
+	}
+
+	reader := &Reader{segment: segment}
+
+	_, _, err = reader.Get([]byte("alpha"))
+	if !errors.Is(err, ErrReaderFileNotOpen) {
+		t.Fatalf("get without open file = %v, want %v", err, ErrReaderFileNotOpen)
 	}
 }

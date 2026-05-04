@@ -139,7 +139,7 @@ func (it *Iterator) ready() bool {
 	if it == nil || it.closed || it.err != nil {
 		return false
 	}
-	if it.reader == nil || it.reader.segment == nil {
+	if it.reader == nil || it.reader.segment == nil || it.reader.closed {
 		it.err = ErrNilSegment
 		return false
 	}

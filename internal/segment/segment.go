@@ -12,7 +12,8 @@ type Segment struct {
 	Index  Index
 	Bloom  BloomFilter
 
-	frozen bool
+	frozen  bool
+	aborted bool
 
 	targetBlockSize int
 	compression     CompressionKind

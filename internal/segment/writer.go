@@ -29,6 +29,7 @@ var (
 	ErrNilFilesystem          = errors.New("segment: nil filesystem")
 	ErrZeroSegmentID          = errors.New("segment: zero segment id")
 	ErrSegmentFileExists      = errors.New("segment: final segment file already exists")
+	ErrSegmentAborted         = errors.New("segment: segment build aborted")
 )
 
 // Options configure one mutable segment writer.
@@ -145,6 +146,9 @@ func (s *Segment) Append(entry BlockEntry) error {
 	if s.frozen {
 		return ErrSegmentFrozen
 	}
+	if s.aborted {
+		return ErrSegmentAborted
+	}
 	if len(s.Index.entries) >= math.MaxUint32 {
 		return ErrTooManySegmentBlocks
 	}
@@ -180,6 +184,9 @@ func (s *Segment) Freeze() error {
 	}
 	if s.frozen {
 		return nil
+	}
+	if s.aborted {
+		return ErrSegmentAborted
 	}
 
 	if err := s.flushBlock(); err != nil {
@@ -246,6 +253,56 @@ func (s *Segment) Freeze() error {
 	s.currentBlockSize = 0
 	s.lastKey = nil
 	s.dataLength = 0
+	return nil
+}
+
+// Abort closes and removes the mutable temp file.
+// It is used when segment build/merge is cancelled before Freeze succeeds.
+func (s *Segment) Abort() error {
+	if s == nil {
+		return ErrInvalidTargetBlockSize
+	}
+	if s.frozen {
+		return ErrSegmentFrozen
+	}
+	if s.aborted {
+		return nil
+	}
+
+	var closeErr error
+	if s.file != nil {
+		closeErr = s.file.Close()
+		s.file = nil
+	}
+
+	var removeErr error
+	if s.fs != nil && s.tempPath != "" {
+		removeErr = s.fs.Remove(s.tempPath)
+		if errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = nil
+		}
+	}
+
+	var syncErr error
+	if s.fs != nil && s.tempPath != "" && removeErr == nil {
+		syncErr = s.fs.SyncDir(filepath.Dir(s.tempPath))
+	}
+
+	s.aborted = true
+	s.currentBlock = Block{}
+	s.currentBlockSize = 0
+	s.lastKey = nil
+	s.dataLength = 0
+
+	if closeErr != nil {
+		return fmt.Errorf("segment: close temp file: %w", closeErr)
+	}
+	if removeErr != nil {
+		return fmt.Errorf("segment: remove temp file: %w", removeErr)
+	}
+	if syncErr != nil {
+		return fmt.Errorf("segment: sync segment dir: %w", syncErr)
+	}
 	return nil
 }
 

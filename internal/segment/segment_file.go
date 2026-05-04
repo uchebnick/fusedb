@@ -149,13 +149,21 @@ func (s *Segment) readSection(section Section) ([]byte, error) {
 }
 
 func (s *Segment) readBlockPayload(entry BlockIndexEntry) ([]byte, error) {
-	if uint64(entry.Offset)+uint64(entry.Length) > s.Footer.Data.Length {
-		return nil, ErrBlockOutsideData
+	section, err := s.blockSection(entry)
+	if err != nil {
+		return nil, err
 	}
-	return s.readSection(Section{
+	return s.readSection(section)
+}
+
+func (s *Segment) blockSection(entry BlockIndexEntry) (Section, error) {
+	if uint64(entry.Offset)+uint64(entry.Length) > s.Footer.Data.Length {
+		return Section{}, ErrBlockOutsideData
+	}
+	return Section{
 		Offset: s.Footer.Data.Offset + entry.Offset,
 		Length: uint64(entry.Length),
-	})
+	}, nil
 }
 
 func validateSegmentLayout(fileSize uint64, footer Footer) error {

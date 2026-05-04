@@ -11,15 +11,18 @@ import (
 var (
 	ErrNilSegment                = errors.New("segment: nil segment")
 	ErrMissingDictionaryRegistry = errors.New("segment: missing dictionary registry for compressed segment")
+	ErrReaderFileNotOpen         = errors.New("segment: reader file is not open")
 )
 
 // Reader provides point-lookups over one frozen immutable segment.
 type Reader struct {
 	segment    *Segment
+	file       disk.File
 	dictionary *compression.Dictionary
+	closed     bool
 }
 
-// NewReader binds a frozen segment to a lookup reader.
+// NewReader binds a frozen segment to a lookup reader and opens its file.
 func NewReader(segment *Segment, registry *compression.Registry) (*Reader, error) {
 	if segment == nil {
 		return nil, ErrNilSegment
@@ -41,6 +44,15 @@ func NewReader(segment *Segment, registry *compression.Registry) (*Reader, error
 		}
 		reader.dictionary = dict
 	}
+
+	if segment.fs == nil || segment.path == "" {
+		return nil, ErrNilFilesystem
+	}
+	file, err := segment.fs.Open(segment.path)
+	if err != nil {
+		return nil, err
+	}
+	reader.file = file
 	return reader, nil
 }
 
@@ -63,7 +75,7 @@ func (r *Reader) Segment() *Segment {
 
 // MayContain checks the segment-wide bloom filter.
 func (r *Reader) MayContain(key []byte) bool {
-	if r == nil || r.segment == nil {
+	if r == nil || r.segment == nil || r.closed {
 		return false
 	}
 	return r.segment.Bloom.MayContain(key)
@@ -71,7 +83,7 @@ func (r *Reader) MayContain(key []byte) bool {
 
 // Get performs a point lookup.
 func (r *Reader) Get(key []byte) ([]byte, bool, error) {
-	if r == nil || r.segment == nil {
+	if r == nil || r.segment == nil || r.closed {
 		return nil, false, ErrNilSegment
 	}
 	if !r.segment.Bloom.MayContain(key) {
@@ -91,8 +103,22 @@ func (r *Reader) Get(key []byte) ([]byte, bool, error) {
 	return value, ok, nil
 }
 
+// Close releases file resources held by the reader.
+func (r *Reader) Close() error {
+	if r == nil || r.closed {
+		return nil
+	}
+	r.closed = true
+	if r.file == nil {
+		return nil
+	}
+	err := r.file.Close()
+	r.file = nil
+	return err
+}
+
 func (r *Reader) readBlock(entry BlockIndexEntry) (Block, error) {
-	payload, err := r.segment.readBlockPayload(entry)
+	payload, err := r.readBlockPayload(entry)
 	if err != nil {
 		return Block{}, err
 	}
@@ -107,4 +133,18 @@ func (r *Reader) readBlock(entry BlockIndexEntry) (Block, error) {
 		return Block{}, fmt.Errorf("segment: decode block: %w", err)
 	}
 	return block, nil
+}
+
+func (r *Reader) readBlockPayload(entry BlockIndexEntry) ([]byte, error) {
+	if r == nil || r.segment == nil || r.closed {
+		return nil, ErrNilSegment
+	}
+	section, err := r.segment.blockSection(entry)
+	if err != nil {
+		return nil, err
+	}
+	if r.file == nil {
+		return nil, ErrReaderFileNotOpen
+	}
+	return readSectionFrom(r.file, section)
 }
