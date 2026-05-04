@@ -21,7 +21,7 @@ func TestConcurrentPutReadDifferentKeys(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
 				key := fmt.Sprintf("worker:%02d:key:%04d", worker, i)
-				list.Put(key, []byte("value"))
+				list.Apply(key, NewPut([]byte("value")))
 				if _, ok := list.Read(key); !ok {
 					t.Errorf("read %s: not found", key)
 					return
@@ -34,6 +34,9 @@ func TestConcurrentPutReadDifferentKeys(t *testing.T) {
 	want := int64(writers * perWriter)
 	if got := list.Len(); got != want {
 		t.Fatalf("len = %d, want %d", got, want)
+	}
+	if got := list.DataBytes(); got != want*int64(len("value")) {
+		t.Fatalf("data bytes = %d, want %d", got, want*int64(len("value")))
 	}
 }
 
@@ -54,11 +57,11 @@ func TestConcurrentMixedOperationsRace(t *testing.T) {
 				key := fmt.Sprintf("key:%02d", (worker+i)%keyCount)
 				switch i % 4 {
 				case 0:
-					list.Put(key, []byte("value"))
+					list.Apply(key, NewPut([]byte("value")))
 				case 1:
-					list.Inc(key, 1)
+					list.Apply(key, NewInc(1))
 				case 2:
-					list.Delete(key)
+					list.Apply(key, NewDelete())
 				default:
 					_, _ = list.SafeRead(key)
 				}
@@ -74,7 +77,7 @@ func TestConcurrentMixedOperationsRace(t *testing.T) {
 
 func TestConcurrentReadWhileInc(t *testing.T) {
 	list := NewSkipList(42)
-	list.Inc("counter", 0)
+	list.Apply("counter", NewInc(0))
 
 	const writers = 4
 	const readers = 4
@@ -108,7 +111,7 @@ func TestConcurrentReadWhileInc(t *testing.T) {
 		go func() {
 			defer writerWG.Done()
 			for j := 0; j < perWriter; j++ {
-				list.Inc("counter", 1)
+				list.Apply("counter", NewInc(1))
 			}
 		}()
 	}
@@ -124,12 +127,15 @@ func TestConcurrentReadWhileInc(t *testing.T) {
 	if delta := DecodeInc(op); delta != want {
 		t.Fatalf("counter delta = %d, want %d", delta, want)
 	}
+	if got := list.DataBytes(); got != int64(len(op.Data)) {
+		t.Fatalf("data bytes = %d, want %d", got, len(op.Data))
+	}
 }
 
 func TestConcurrentIterWhileWriting(t *testing.T) {
 	list := NewSkipList(42)
 	for i := 0; i < 128; i++ {
-		list.Put(fmt.Sprintf("seed:%03d", i), []byte("value"))
+		list.Apply(fmt.Sprintf("seed:%03d", i), NewPut([]byte("value")))
 	}
 
 	const writers = 4
@@ -167,7 +173,7 @@ func TestConcurrentIterWhileWriting(t *testing.T) {
 			defer writerWG.Done()
 			for i := 0; i < iterations; i++ {
 				key := fmt.Sprintf("writer:%02d:key:%04d", worker, i)
-				list.Put(key, []byte("value"))
+				list.Apply(key, NewPut([]byte("value")))
 			}
 		}()
 	}
@@ -178,13 +184,13 @@ func TestConcurrentIterWhileWriting(t *testing.T) {
 
 func TestSafeAPIsReturnOwnedData(t *testing.T) {
 	list := NewSkipList(42)
-	list.Put("alpha", []byte("stable"))
+	list.Apply("alpha", NewPut([]byte("stable")))
 
-	value, ok := list.Get("alpha")
+	valueOp, ok := list.SafeRead("alpha")
 	if !ok {
-		t.Fatal("get alpha: not found")
+		t.Fatal("safe read alpha: not found")
 	}
-	value[0] = 'X'
+	valueOp.Data[0] = 'X'
 
 	op, ok := list.SafeRead("alpha")
 	if !ok {
@@ -198,11 +204,11 @@ func TestSafeAPIsReturnOwnedData(t *testing.T) {
 		}
 	}
 
-	again, ok := list.Get("alpha")
+	again, ok := list.SafeRead("alpha")
 	if !ok {
-		t.Fatal("get alpha again: not found")
+		t.Fatal("safe read alpha again: not found")
 	}
-	if string(again) != "stable" {
-		t.Fatalf("safe API exposed shared data: got %q", again)
+	if string(again.Data) != "stable" {
+		t.Fatalf("safe API exposed shared data: got %q", again.Data)
 	}
 }

@@ -9,9 +9,9 @@
 //   - Constructors such as NewPut and NewInc create owned Op.Data buffers.
 //
 // Read contract:
-//   - read and iter are internal zero-copy view APIs.
-//   - Callers of read and iter must not mutate returned Op.Data.
-//   - safeRead and safeIter copy Op.Data before returning it.
+//   - Read and Iter are zero-copy view APIs.
+//   - Callers of Read and Iter must not mutate returned Op.Data.
+//   - SafeRead and SafeIter copy Op.Data before returning it.
 //
 // Concurrency contract:
 //   - Active nodes are not physically removed.

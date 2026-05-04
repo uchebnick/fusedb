@@ -26,34 +26,69 @@ func TestReadPut(t *testing.T) {
 	}
 }
 
-func TestDBHelpers(t *testing.T) {
+func TestOperationAPI(t *testing.T) {
 	list := NewSkipList(42)
 
-	list.Put("alpha", []byte("1"))
-	value, ok := list.Get("alpha")
-	if !ok || !bytes.Equal(value, []byte("1")) {
-		t.Fatalf("get alpha = %q, %v; want 1, true", value, ok)
+	list.Apply("alpha", NewPut([]byte("1")))
+	op, ok := list.SafeRead("alpha")
+	if !ok || op.Kind != OpPut || !bytes.Equal(op.Data, []byte("1")) {
+		t.Fatalf("safe read alpha = %#v, %v; want put(1), true", op, ok)
 	}
 
-	value[0] = 'X'
-	again, ok := list.Get("alpha")
-	if !ok || string(again) != "1" {
-		t.Fatalf("get alpha after mutation = %q, %v; want 1, true", again, ok)
+	op.Data[0] = 'X'
+	again, ok := list.SafeRead("alpha")
+	if !ok || again.Kind != OpPut || string(again.Data) != "1" {
+		t.Fatalf("safe read alpha after mutation = %#v, %v; want put(1), true", again, ok)
 	}
 
-	list.Delete("alpha")
-	if value, ok := list.Get("alpha"); ok {
-		t.Fatalf("get deleted alpha = %q, want not found", value)
+	list.Apply("alpha", NewDelete())
+	op, ok = list.Read("alpha")
+	if !ok || op.Kind != OpDelete {
+		t.Fatalf("read deleted alpha = %#v, %v; want delete, true", op, ok)
 	}
 
-	list.Inc("counter", 2)
-	list.Inc("counter", 3)
-	op, ok := list.Read("counter")
+	list.Apply("counter", NewInc(2))
+	list.Apply("counter", NewInc(3))
+	op, ok = list.Read("counter")
 	if !ok {
 		t.Fatal("read counter: not found")
 	}
 	if delta := DecodeInc(op); delta != 5 {
 		t.Fatalf("counter delta = %d, want 5", delta)
+	}
+}
+
+func TestDataBytesTracksMutations(t *testing.T) {
+	list := NewSkipList(42)
+
+	list.Apply("alpha", NewPut([]byte("12345")))
+	if got, want := list.DataBytes(), int64(5); got != want {
+		t.Fatalf("data bytes after insert = %d, want %d", got, want)
+	}
+
+	list.Apply("alpha", NewPut([]byte("123456789")))
+	if got, want := list.DataBytes(), int64(9); got != want {
+		t.Fatalf("data bytes after update = %d, want %d", got, want)
+	}
+
+	list.Apply("beta", NewPut([]byte("12")))
+	if got, want := list.DataBytes(), int64(11); got != want {
+		t.Fatalf("data bytes after second insert = %d, want %d", got, want)
+	}
+
+	list.Apply("alpha", NewDelete())
+	if got, want := list.DataBytes(), int64(2); got != want {
+		t.Fatalf("data bytes after delete = %d, want %d", got, want)
+	}
+
+	list.Apply("counter", NewInc(1))
+	if got, want := list.DataBytes(), int64(3); got != want {
+		t.Fatalf("data bytes after inc insert = %d, want %d", got, want)
+	}
+
+	list.Apply("counter", NewInc(127))
+	if got, want := list.DataBytes(), int64(4); got != want {
+		t.Fatalf("data bytes after inc coalesce = %d, want %d", got, want)
 	}
 }
 

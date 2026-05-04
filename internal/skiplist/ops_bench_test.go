@@ -96,7 +96,7 @@ func BenchmarkCoalesceCopyOldPtr(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		oldPtr := ptr.Load()
-		merged := CoalesceToNew(*oldPtr, next)
+		merged := coalesceToNew(*oldPtr, next)
 		if !ptr.CompareAndSwap(oldPtr, &merged) {
 			b.Fatal("unexpected CAS failure")
 		}

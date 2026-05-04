@@ -15,21 +15,18 @@ const maxHeight = 20
 // removes active nodes. The structure is intended for internal buffer/memtable
 // use, not as a general-purpose ordered map.
 type SkipList struct {
-	head      *Node
+	head      *node
 	height    atomic.Int32
 	nodeCount atomic.Int64
+	dataBytes atomic.Int64
 	seed      uint64
 }
 
-// Node is one published skiplist node.
-//
-// Node is exported only because higher internal layers may need to talk about
-// skiplist internals during debugging and tests. Callers should not mutate Node
-// fields directly.
-type Node struct {
+// node is one published skiplist node.
+type node struct {
 	key  string
 	op   atomic.Pointer[Op]
-	next []atomic.Pointer[Node]
+	next []atomic.Pointer[node]
 }
 
 // NewSkipList creates an empty SkipList.
@@ -42,8 +39,8 @@ func NewSkipList(seed uint64) *SkipList {
 	}
 
 	skiplist := &SkipList{
-		head: &Node{
-			next: make([]atomic.Pointer[Node], maxHeight),
+		head: &node{
+			next: make([]atomic.Pointer[node], maxHeight),
 		},
 		seed: seed,
 	}
@@ -59,8 +56,22 @@ func (s *SkipList) Len() int64 {
 	return s.nodeCount.Load()
 }
 
-func (s *SkipList) apply(key string, op Op) {
-	var prevList, nextList [maxHeight]*Node
+// DataBytes returns the total byte length of Op.Data payloads currently stored.
+//
+// Deletes contribute zero data bytes. Updates adjust the counter after the new
+// operation is successfully published.
+func (s *SkipList) DataBytes() int64 {
+	return s.dataBytes.Load()
+}
+
+// Apply publishes op for key.
+//
+// The caller must treat op.Data as immutable after this call. If key already
+// exists, Apply publishes a new coalesced Op without relinking the node. If key
+// does not exist, Apply inserts a new node and links level 0 before publishing
+// upper levels.
+func (s *SkipList) Apply(key string, op Op) {
+	var prevList, nextList [maxHeight]*node
 
 	for {
 		s.findSplice(key, &prevList, &nextList)
@@ -86,7 +97,11 @@ func (s *SkipList) apply(key string, op Op) {
 	}
 }
 
-func (s *SkipList) read(key string) (Op, bool) {
+// Read returns the current Op for key without copying Op.Data.
+//
+// The returned Op is a view of immutable skiplist-owned data. Callers must not
+// mutate returned Op.Data. Use SafeRead when the caller needs an owned copy.
+func (s *SkipList) Read(key string) (Op, bool) {
 	_, next := s.findSpliceAtLevel(key, 0)
 
 	if next == nil || next.key != key {
@@ -101,8 +116,9 @@ func (s *SkipList) read(key string) (Op, bool) {
 	return *op, true
 }
 
-func (s *SkipList) safeRead(key string) (Op, bool) {
-	op, ok := s.read(key)
+// SafeRead returns the current Op for key with an owned copy of Op.Data.
+func (s *SkipList) SafeRead(key string) (Op, bool) {
+	op, ok := s.Read(key)
 	if !ok {
 		return Op{}, false
 	}
@@ -110,7 +126,12 @@ func (s *SkipList) safeRead(key string) (Op, bool) {
 	return *op.copy(), true
 }
 
-func (s *SkipList) iter() iter.Seq2[string, Op] {
+// Iter returns a zero-copy ordered iterator over all live skiplist nodes.
+//
+// Deletes are yielded as OpDelete tombstones. Returned Op.Data shares storage
+// with the skiplist and must not be mutated by the caller. Use SafeIter when
+// the caller needs owned Op.Data buffers.
+func (s *SkipList) Iter() iter.Seq2[string, Op] {
 	return func(yield func(string, Op) bool) {
 		for x := s.head.next[0].Load(); x != nil; x = x.next[0].Load() {
 			op := x.op.Load()
@@ -125,9 +146,10 @@ func (s *SkipList) iter() iter.Seq2[string, Op] {
 	}
 }
 
-func (s *SkipList) safeIter() iter.Seq2[string, Op] {
+// SafeIter returns an ordered iterator that copies Op.Data for every yielded Op.
+func (s *SkipList) SafeIter() iter.Seq2[string, Op] {
 	return func(yield func(string, Op) bool) {
-		for key, op := range s.iter() {
+		for key, op := range s.Iter() {
 			if !yield(key, *op.copy()) {
 				return
 			}
@@ -135,14 +157,14 @@ func (s *SkipList) safeIter() iter.Seq2[string, Op] {
 	}
 }
 
-func newNode(key string, op Op, height int32) *Node {
-	node := &Node{
+func newNode(key string, op Op, height int32) *node {
+	n := &node{
 		key:  key,
-		next: make([]atomic.Pointer[Node], height),
+		next: make([]atomic.Pointer[node], height),
 	}
-	node.op.Store(&op)
+	n.op.Store(&op)
 
-	return node
+	return n
 }
 
 func (s *SkipList) randomHeight(key string) int32 {
@@ -157,7 +179,7 @@ func (s *SkipList) randomHeight(key string) int32 {
 	return h
 }
 
-func (s *SkipList) findSplice(key string, prevList, nextList *[maxHeight]*Node) {
+func (s *SkipList) findSplice(key string, prevList, nextList *[maxHeight]*node) {
 	x := s.head
 
 	for level := s.height.Load() - 1; level >= 0; level-- {
@@ -173,7 +195,7 @@ func (s *SkipList) findSplice(key string, prevList, nextList *[maxHeight]*Node) 
 	}
 }
 
-func (s *SkipList) findSpliceAtLevel(key string, targetLevel int32) (*Node, *Node) {
+func (s *SkipList) findSpliceAtLevel(key string, targetLevel int32) (*node, *node) {
 	x := s.head
 
 	for level := s.height.Load() - 1; level >= targetLevel; level-- {
@@ -192,12 +214,13 @@ func (s *SkipList) findSpliceAtLevel(key string, targetLevel int32) (*Node, *Nod
 	return s.head, s.head.next[targetLevel].Load()
 }
 
-func (s *SkipList) updateNode(node *Node, op Op) {
+func (s *SkipList) updateNode(n *node, op Op) {
 	for {
-		oldPtr := node.op.Load()
+		oldPtr := n.op.Load()
 
-		merged := CoalesceToNew(*oldPtr, op)
-		if node.op.CompareAndSwap(oldPtr, &merged) {
+		merged := coalesceToNew(*oldPtr, op)
+		if n.op.CompareAndSwap(oldPtr, &merged) {
+			s.dataBytes.Add(int64(len(merged.Data) - len(oldPtr.Data)))
 			return
 		}
 	}
@@ -207,7 +230,7 @@ func (s *SkipList) prepareNewLevels(
 	oldHeight,
 	nodeHeight int32,
 	prevList,
-	nextList *[maxHeight]*Node,
+	nextList *[maxHeight]*node,
 ) {
 	if nodeHeight <= oldHeight {
 		return
@@ -220,9 +243,9 @@ func (s *SkipList) prepareNewLevels(
 }
 
 func (s *SkipList) publishBaseLevel(
-	node *Node,
+	node *node,
 	prevList,
-	nextList *[maxHeight]*Node,
+	nextList *[maxHeight]*node,
 ) bool {
 	node.next[0].Store(nextList[0])
 
@@ -231,15 +254,16 @@ func (s *SkipList) publishBaseLevel(
 	}
 
 	s.nodeCount.Add(1)
+	s.dataBytes.Add(int64(len(node.op.Load().Data)))
 	return true
 }
 
 func (s *SkipList) publishUpperLevels(
 	key string,
-	node *Node,
+	node *node,
 	nodeHeight int32,
 	prevList,
-	nextList *[maxHeight]*Node,
+	nextList *[maxHeight]*node,
 ) {
 	for level := int32(1); level < nodeHeight; level++ {
 		for {
@@ -263,11 +287,7 @@ func (s *SkipList) growHeight(oldHeight, nodeHeight int32) {
 	}
 }
 
-// CoalesceToNew merges next into old when the operation pair is mergeable.
-//
-// The returned Op is safe to publish as a new immutable value. The input Op
-// values are not mutated.
-func CoalesceToNew(old, next Op) Op {
+func coalesceToNew(old, next Op) Op {
 	switch next.Kind {
 	case OpPut, OpDelete:
 		return next
