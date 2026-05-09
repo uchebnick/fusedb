@@ -103,12 +103,7 @@ func (r *Reader) Get(key []byte) ([]byte, bool, error) {
 		return nil, false, nil
 	}
 
-	block, err := r.readBlock(entry)
-	if err != nil {
-		return nil, false, err
-	}
-	value, ok := block.Find(key)
-	return value, ok, nil
+	return r.readBlockValue(entry, key)
 }
 
 // Close releases file resources held by the reader.
@@ -126,14 +121,6 @@ func (r *Reader) Close() error {
 }
 
 func (r *Reader) readBlock(entry BlockIndexEntry) (Block, error) {
-	return r.decodeBlock(entry, false)
-}
-
-func (r *Reader) readBlockUnsafe(entry BlockIndexEntry) (Block, error) {
-	return r.decodeBlock(entry, true)
-}
-
-func (r *Reader) decodeBlock(entry BlockIndexEntry, unsafe bool) (Block, error) {
 	payload, err := r.readBlockPayload(entry)
 	if err != nil {
 		return Block{}, err
@@ -144,16 +131,33 @@ func (r *Reader) decodeBlock(entry BlockIndexEntry, unsafe bool) (Block, error) 
 			return Block{}, fmt.Errorf("segment: decompress block: %w", err)
 		}
 	}
-	var block Block
-	if unsafe {
-		block, err = DecodeBlockUnsafe(payload)
-	} else {
-		block, err = DecodeBlock(payload)
-	}
+	block, err := DecodeBlockUnsafe(payload)
 	if err != nil {
 		return Block{}, fmt.Errorf("segment: decode block: %w", err)
 	}
 	return block, nil
+}
+
+func (r *Reader) readBlockValue(entry BlockIndexEntry, key []byte) ([]byte, bool, error) {
+	payload, err := r.readBlockPayload(entry)
+	if err != nil {
+		return nil, false, err
+	}
+	if r.segment.Header.Compression == CompressionZstdDict {
+		payload, err = r.dictionary.Decompress(payload)
+		if err != nil {
+			return nil, false, fmt.Errorf("segment: decompress block: %w", err)
+		}
+	}
+	view, err := NewBlockView(payload)
+	if err != nil {
+		return nil, false, fmt.Errorf("segment: decode block: %w", err)
+	}
+	value, ok, err := view.Find(key)
+	if err != nil {
+		return nil, false, fmt.Errorf("segment: find block value: %w", err)
+	}
+	return value, ok, nil
 }
 
 func (r *Reader) readBlockPayload(entry BlockIndexEntry) ([]byte, error) {

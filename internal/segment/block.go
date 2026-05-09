@@ -126,7 +126,7 @@ func (b *Block) Find(key []byte) ([]byte, bool) {
 			hi = mid
 			continue
 		}
-		return bytes.Clone(b.entries[mid].Value), true
+		return b.entries[mid].Value, true
 	}
 	return nil, false
 }

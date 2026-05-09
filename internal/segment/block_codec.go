@@ -104,7 +104,7 @@ func EncodeBlock(block Block) ([]byte, error) {
 
 // DecodeBlock decodes one raw block.
 func DecodeBlock(data []byte) (Block, error) {
-	return decodeBlock(data, true)
+	return decodeBlock(data)
 }
 
 // DecodeBlockUnsafe decodes one raw block without copying key/value bytes.
@@ -112,81 +112,93 @@ func DecodeBlock(data []byte) (Block, error) {
 // Decoded entries borrow memory from data. Callers must keep data immutable and
 // alive for as long as the returned block is used.
 func DecodeBlockUnsafe(data []byte) (Block, error) {
-	return decodeBlock(data, false)
+	return decodeBlock(data)
 }
 
-func decodeBlock(data []byte, clone bool) (Block, error) {
+// NewBlockView validates an encoded block and returns a zero-copy lookup view.
+func NewBlockView(data []byte) (BlockView, error) {
 	if len(data) < rawBlockHeaderSize+rawBlockChecksumSize {
-		return Block{}, ErrShortBlockBuffer
+		return BlockView{}, ErrShortBlockBuffer
 	}
 	if !bytes.Equal(data[:4], rawBlockMagicBytes) {
-		return Block{}, ErrBlockMagicMismatch
+		return BlockView{}, ErrBlockMagicMismatch
 	}
 
 	version := binary.LittleEndian.Uint32(data[4:8])
 	if version != rawBlockVersion {
-		return Block{}, fmt.Errorf("%w: %d", ErrUnsupportedBlockVersion, version)
+		return BlockView{}, fmt.Errorf("%w: %d", ErrUnsupportedBlockVersion, version)
 	}
 
 	entryCount := int(binary.LittleEndian.Uint32(data[8:12]))
 	offsetsSize := entryCount * 4
 	if len(data) < rawBlockHeaderSize+offsetsSize+rawBlockChecksumSize {
-		return Block{}, ErrShortBlockBuffer
+		return BlockView{}, ErrShortBlockBuffer
 	}
 
 	checksumPos := len(data) - rawBlockChecksumSize
 	offsetsPos := checksumPos - offsetsSize
 	if offsetsPos < rawBlockHeaderSize {
-		return Block{}, ErrCorruptBlockOffsets
+		return BlockView{}, ErrCorruptBlockOffsets
 	}
 
 	wantChecksum := binary.LittleEndian.Uint32(data[checksumPos:])
 	gotChecksum := crc32.ChecksumIEEE(data[:checksumPos])
 	if gotChecksum != wantChecksum {
-		return Block{}, ErrBlockChecksumMismatch
+		return BlockView{}, ErrBlockChecksumMismatch
+	}
+
+	return BlockView{
+		data:        data,
+		entryCount:  entryCount,
+		offsetsPos:  offsetsPos,
+		checksumPos: checksumPos,
+	}, nil
+}
+
+func decodeBlock(data []byte) (Block, error) {
+	view, err := NewBlockView(data)
+	if err != nil {
+		return Block{}, err
 	}
 
 	block := Block{
-		entries: make([]BlockEntry, 0, entryCount),
+		entries: make([]BlockEntry, 0, view.entryCount),
 	}
-	for i := 0; i < entryCount; i++ {
-		offset := int(binary.LittleEndian.Uint32(data[offsetsPos+i*4 : offsetsPos+(i+1)*4]))
-		next := offsetsPos
-		if i+1 < entryCount {
-			next = int(binary.LittleEndian.Uint32(data[offsetsPos+(i+1)*4 : offsetsPos+(i+2)*4]))
+	for i := 0; i < view.entryCount; i++ {
+		entry, err := view.Entry(i)
+		if err != nil {
+			return Block{}, err
 		}
-
-		if offset < rawBlockHeaderSize || offset >= offsetsPos || next <= offset || next > offsetsPos {
-			return Block{}, ErrCorruptBlockOffsets
-		}
-		if next-offset < rawBlockEntryHeaderSize {
-			return Block{}, ErrShortBlockBuffer
-		}
-
-		pos := offset
-		keyLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
-		pos += 4
-		valueLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
-		pos += 4
-
-		if pos+keyLen+valueLen != next {
-			return Block{}, ErrShortBlockBuffer
-		}
-
-		key := data[pos : pos+keyLen]
-		pos += keyLen
-		value := data[pos : pos+valueLen]
-		if clone {
-			key = bytes.Clone(key)
-			value = bytes.Clone(value)
-		}
-
-		if err := block.AddUnsafe(BlockEntry{Key: key, Value: value}); err != nil {
+		if err := block.AddUnsafe(entry); err != nil {
 			return Block{}, err
 		}
 	}
 
 	return block, nil
+}
+
+func decodeBlockEntryAt(data []byte, offset, next, offsetsPos int) (BlockEntry, error) {
+	if offset < rawBlockHeaderSize || offset >= offsetsPos || next <= offset || next > offsetsPos {
+		return BlockEntry{}, ErrCorruptBlockOffsets
+	}
+	if next-offset < rawBlockEntryHeaderSize {
+		return BlockEntry{}, ErrShortBlockBuffer
+	}
+
+	pos := offset
+	keyLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+	pos += 4
+	valueLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+	pos += 4
+
+	if pos+keyLen+valueLen != next {
+		return BlockEntry{}, ErrShortBlockBuffer
+	}
+
+	key := data[pos : pos+keyLen]
+	pos += keyLen
+	value := data[pos : pos+valueLen]
+	return BlockEntry{Key: key, Value: value}, nil
 }
 
 // EncodeBlocks packs many raw blocks into one byte blob and returns an index

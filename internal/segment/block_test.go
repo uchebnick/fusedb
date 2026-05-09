@@ -34,6 +34,21 @@ func TestBlockRawRoundTrip(t *testing.T) {
 	if !bytes.Equal(value, []byte("2")) {
 		t.Fatalf("beta value = %q, want %q", value, []byte("2"))
 	}
+
+	view, err := NewBlockView(encoded)
+	if err != nil {
+		t.Fatalf("new block view: %v", err)
+	}
+	value, ok, err = view.Find([]byte("delta"))
+	if err != nil {
+		t.Fatalf("view find delta: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected delta value")
+	}
+	if !bytes.Equal(value, []byte("3")) {
+		t.Fatalf("delta value = %q, want %q", value, []byte("3"))
+	}
 }
 
 func TestEncodeBlocksBuildsIndex(t *testing.T) {

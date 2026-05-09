@@ -38,7 +38,7 @@ func (r *Reader) IterFrom(target []byte) iter.Seq2[[]byte, []byte] {
 				return
 			}
 
-			block, err := r.readBlockUnsafe(indexEntry)
+			block, err := r.readBlock(indexEntry)
 			if err != nil {
 				return
 			}
