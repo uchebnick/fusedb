@@ -61,6 +61,7 @@ func TestReaderGetRaw(t *testing.T) {
 	if ok || value != nil {
 		t.Fatalf("missing lookup = (%q, %v), want nil,false", value, ok)
 	}
+
 }
 
 func TestReaderIteratorRaw(t *testing.T) {
@@ -100,20 +101,7 @@ func TestReaderIteratorRaw(t *testing.T) {
 		t.Fatalf("new reader: %v", err)
 	}
 
-	it := reader.NewIterator()
-	defer it.Close()
-
-	var got []BlockEntry
-	for ok := it.First(); ok; ok = it.Next() {
-		entry, ok := it.Entry()
-		if !ok {
-			t.Fatal("iterator valid but entry missing")
-		}
-		got = append(got, entry)
-	}
-	if err := it.Err(); err != nil {
-		t.Fatalf("iterator error: %v", err)
-	}
+	got := collectReaderEntries(reader.Iter())
 	if len(got) != len(want) {
 		t.Fatalf("iterated entries = %d, want %d", len(got), len(want))
 	}
@@ -123,24 +111,20 @@ func TestReaderIteratorRaw(t *testing.T) {
 		}
 	}
 
-	if !it.Seek([]byte("charlie")) {
-		t.Fatal("expected seek to lower-bound delta")
+	fromCharlie := collectReaderEntries(reader.IterFrom([]byte("charlie")))
+	if len(fromCharlie) < 2 {
+		t.Fatalf("iter from charlie returned %d entries, want at least 2", len(fromCharlie))
 	}
-	if !bytes.Equal(it.Key(), []byte("delta")) || !bytes.Equal(it.Value(), []byte("3")) {
-		t.Fatalf("seek charlie = (%q,%q), want delta,3", it.Key(), it.Value())
+	if !bytes.Equal(fromCharlie[0].Key, []byte("delta")) || !bytes.Equal(fromCharlie[0].Value, []byte("3")) {
+		t.Fatalf("iter from charlie first = (%q,%q), want delta,3", fromCharlie[0].Key, fromCharlie[0].Value)
 	}
-	if !it.Next() {
-		t.Fatal("expected next after delta")
+	if !bytes.Equal(fromCharlie[1].Key, []byte("gamma")) {
+		t.Fatalf("iter from charlie second key = %q, want gamma", fromCharlie[1].Key)
 	}
-	if !bytes.Equal(it.Key(), []byte("gamma")) {
-		t.Fatalf("next key = %q, want gamma", it.Key())
+	if got := collectReaderEntries(reader.IterFrom([]byte("zzz"))); len(got) != 0 {
+		t.Fatalf("iter from zzz = %v, want empty", got)
 	}
-	if it.Seek([]byte("zzz")) {
-		t.Fatal("seek past end should be invalid")
-	}
-	if it.Err() != nil {
-		t.Fatalf("seek past end error = %v, want nil", it.Err())
-	}
+
 }
 
 func TestOpenReaderCompressed(t *testing.T) {
@@ -252,19 +236,14 @@ func TestReaderIteratorCompressed(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reader.Close() })
 
-	it := reader.NewIterator()
-	defer it.Close()
-
-	for i, ok := 0, it.First(); ok; i, ok = i+1, it.Next() {
-		if i >= len(want) {
-			t.Fatalf("iterator returned extra key %q", it.Key())
-		}
-		if !bytes.Equal(it.Key(), want[i].Key) || !bytes.Equal(it.Value(), want[i].Value) {
-			t.Fatalf("entry %d = (%q,%q), want (%q,%q)", i, it.Key(), it.Value(), want[i].Key, want[i].Value)
-		}
+	got := collectReaderEntries(reader.Iter())
+	if len(got) != len(want) {
+		t.Fatalf("iterated entries = %d, want %d", len(got), len(want))
 	}
-	if err := it.Err(); err != nil {
-		t.Fatalf("iterator error: %v", err)
+	for i := range want {
+		if !bytes.Equal(got[i].Key, want[i].Key) || !bytes.Equal(got[i].Value, want[i].Value) {
+			t.Fatalf("entry %d = (%q,%q), want (%q,%q)", i, got[i].Key, got[i].Value, want[i].Key, want[i].Value)
+		}
 	}
 }
 
@@ -420,4 +399,15 @@ func TestReaderRequiresOpenFile(t *testing.T) {
 	if !errors.Is(err, ErrReaderFileNotOpen) {
 		t.Fatalf("get without open file = %v, want %v", err, ErrReaderFileNotOpen)
 	}
+}
+
+func collectReaderEntries(seq func(func([]byte, []byte) bool)) []BlockEntry {
+	var entries []BlockEntry
+	for key, value := range seq {
+		entries = append(entries, BlockEntry{
+			Key:   key,
+			Value: value,
+		})
+	}
+	return entries
 }

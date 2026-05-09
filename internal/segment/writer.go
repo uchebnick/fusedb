@@ -140,6 +140,19 @@ func NewSegment(opts Options) (*Segment, error) {
 
 // Append adds one sorted entry into mutable segment state.
 func (s *Segment) Append(entry BlockEntry) error {
+	return s.append(entry, true)
+}
+
+// AppendUnsafe adds one sorted entry without copying key/value into the current block.
+//
+// Callers must keep entry bytes immutable until the segment flushes its current
+// block. This is intended for merge paths where source entries are already
+// immutable and short-lived.
+func (s *Segment) AppendUnsafe(entry BlockEntry) error {
+	return s.append(entry, false)
+}
+
+func (s *Segment) append(entry BlockEntry, clone bool) error {
 	if s == nil {
 		return ErrInvalidTargetBlockSize
 	}
@@ -163,8 +176,14 @@ func (s *Segment) Append(entry BlockEntry) error {
 		}
 	}
 
-	if err := s.currentBlock.Add(entry); err != nil {
-		return err
+	if clone {
+		if err := s.currentBlock.Add(entry); err != nil {
+			return err
+		}
+	} else {
+		if err := s.currentBlock.AddUnsafe(entry); err != nil {
+			return err
+		}
 	}
 	s.currentBlockSize += entrySize
 	s.Bloom.Add(entry.Key)
@@ -175,6 +194,11 @@ func (s *Segment) Append(entry BlockEntry) error {
 // AppendKV adds one sorted key/value pair into mutable segment state.
 func (s *Segment) AppendKV(key, value []byte) error {
 	return s.Append(BlockEntry{Key: key, Value: value})
+}
+
+// AppendKVUnsafe adds one sorted key/value pair without copying bytes.
+func (s *Segment) AppendKVUnsafe(key, value []byte) error {
+	return s.AppendUnsafe(BlockEntry{Key: key, Value: value})
 }
 
 // Freeze finalizes segment bytes and makes the segment immutable.

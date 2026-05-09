@@ -14,8 +14,8 @@ import (
 
 const (
 	MinDictionarySize     = 8
-	DefaultDictionarySize = 64 << 10
-	DefaultZstdLevel      = 3
+	DefaultDictionarySize = 8 << 10
+	DefaultZstdLevel      = 1
 )
 
 var (

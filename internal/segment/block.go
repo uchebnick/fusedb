@@ -67,6 +67,18 @@ func (b *Block) Entry(i int) (BlockEntry, bool) {
 
 // Add appends one validated entry to block.
 func (b *Block) Add(entry BlockEntry) error {
+	if err := b.AddUnsafe(entry); err != nil {
+		return err
+	}
+	b.entries[len(b.entries)-1] = b.entries[len(b.entries)-1].Clone()
+	return nil
+}
+
+// AddUnsafe appends one validated entry without copying key/value bytes.
+//
+// Callers must guarantee that entry.Key and entry.Value stay immutable for the
+// lifetime of the block. Prefer Add unless ownership is already clear.
+func (b *Block) AddUnsafe(entry BlockEntry) error {
 	if len(entry.Key) == 0 {
 		return ErrEmptyBlockKey
 	}
@@ -76,13 +88,18 @@ func (b *Block) Add(entry BlockEntry) error {
 			return ErrUnsortedBlockEntries
 		}
 	}
-	b.entries = append(b.entries, entry.Clone())
+	b.entries = append(b.entries, entry)
 	return nil
 }
 
 // AddKV appends one validated key/value pair to block.
 func (b *Block) AddKV(key, value []byte) error {
 	return b.Add(BlockEntry{Key: key, Value: value})
+}
+
+// AddKVUnsafe appends one validated key/value pair without copying bytes.
+func (b *Block) AddKVUnsafe(key, value []byte) error {
+	return b.AddUnsafe(BlockEntry{Key: key, Value: value})
 }
 
 // Separator returns inclusive upper bound key for block.

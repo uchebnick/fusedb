@@ -74,6 +74,14 @@ func (r *Reader) Segment() *Segment {
 }
 
 // MayContain checks the segment-wide bloom filter.
+func (s *Segment) MayContain(key []byte) bool {
+	if s == nil || !s.Frozen() {
+		return false
+	}
+	return s.Bloom.MayContain(key)
+}
+
+// MayContain checks the segment-wide bloom filter.
 func (r *Reader) MayContain(key []byte) bool {
 	if r == nil || r.segment == nil || r.closed {
 		return false
@@ -118,6 +126,14 @@ func (r *Reader) Close() error {
 }
 
 func (r *Reader) readBlock(entry BlockIndexEntry) (Block, error) {
+	return r.decodeBlock(entry, false)
+}
+
+func (r *Reader) readBlockUnsafe(entry BlockIndexEntry) (Block, error) {
+	return r.decodeBlock(entry, true)
+}
+
+func (r *Reader) decodeBlock(entry BlockIndexEntry, unsafe bool) (Block, error) {
 	payload, err := r.readBlockPayload(entry)
 	if err != nil {
 		return Block{}, err
@@ -128,7 +144,12 @@ func (r *Reader) readBlock(entry BlockIndexEntry) (Block, error) {
 			return Block{}, fmt.Errorf("segment: decompress block: %w", err)
 		}
 	}
-	block, err := DecodeBlock(payload)
+	var block Block
+	if unsafe {
+		block, err = DecodeBlockUnsafe(payload)
+	} else {
+		block, err = DecodeBlock(payload)
+	}
 	if err != nil {
 		return Block{}, fmt.Errorf("segment: decode block: %w", err)
 	}

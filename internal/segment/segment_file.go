@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
 	"fusedb/internal/disk"
@@ -164,6 +165,20 @@ func (s *Segment) blockSection(entry BlockIndexEntry) (Section, error) {
 		Offset: s.Footer.Data.Offset + entry.Offset,
 		Length: uint64(entry.Length),
 	}, nil
+}
+
+// Remove deletes a finalized segment file.
+func (s *Segment) Remove() error {
+	if s == nil {
+		return ErrNilSegment
+	}
+	if s.fs == nil || s.path == "" {
+		return ErrNilFilesystem
+	}
+	if err := s.fs.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return s.fs.SyncDir(filepath.Dir(s.path))
 }
 
 func validateSegmentLayout(fileSize uint64, footer Footer) error {

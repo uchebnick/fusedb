@@ -1,6 +1,7 @@
 package segment
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ const (
 	rawBlockEntryHeaderSize = 4 + 4
 	rawBlockChecksumSize    = 4
 )
+
+var rawBlockMagicBytes = []byte(rawBlockMagic)
 
 var (
 	ErrTooManyBlockEntries     = errors.New("segment: too many block entries")
@@ -101,10 +104,22 @@ func EncodeBlock(block Block) ([]byte, error) {
 
 // DecodeBlock decodes one raw block.
 func DecodeBlock(data []byte) (Block, error) {
+	return decodeBlock(data, true)
+}
+
+// DecodeBlockUnsafe decodes one raw block without copying key/value bytes.
+//
+// Decoded entries borrow memory from data. Callers must keep data immutable and
+// alive for as long as the returned block is used.
+func DecodeBlockUnsafe(data []byte) (Block, error) {
+	return decodeBlock(data, false)
+}
+
+func decodeBlock(data []byte, clone bool) (Block, error) {
 	if len(data) < rawBlockHeaderSize+rawBlockChecksumSize {
 		return Block{}, ErrShortBlockBuffer
 	}
-	if string(data[:4]) != rawBlockMagic {
+	if !bytes.Equal(data[:4], rawBlockMagicBytes) {
 		return Block{}, ErrBlockMagicMismatch
 	}
 
@@ -158,11 +173,15 @@ func DecodeBlock(data []byte) (Block, error) {
 			return Block{}, ErrShortBlockBuffer
 		}
 
-		key := append([]byte(nil), data[pos:pos+keyLen]...)
+		key := data[pos : pos+keyLen]
 		pos += keyLen
-		value := append([]byte(nil), data[pos:pos+valueLen]...)
+		value := data[pos : pos+valueLen]
+		if clone {
+			key = bytes.Clone(key)
+			value = bytes.Clone(value)
+		}
 
-		if err := block.Add(BlockEntry{Key: key, Value: value}); err != nil {
+		if err := block.AddUnsafe(BlockEntry{Key: key, Value: value}); err != nil {
 			return Block{}, err
 		}
 	}
