@@ -1,11 +1,12 @@
 # Skiplist Module
 
 `internal/skiplist` is FuseDB's in-memory ordered mutation buffer.
+Operation types live in `internal/ops` and are stored by the skiplist.
 
 It is not a general-purpose ordered map. The module is specialized for database
 memtable-style usage:
 
-- keys are `string`
+- keys are `[]byte`
 - values are typed mutation operations (`Op`)
 - deletes are tombstones
 - active nodes are not physically removed
@@ -45,7 +46,7 @@ value-oriented reads when they need them.
 
 ## Operation Model
 
-`Op` is the internal mutation currency.
+`ops.Op` is the internal mutation currency.
 
 Supported operations:
 
@@ -59,14 +60,16 @@ Supported operations:
 
 ## Ownership Contract
 
-`Op.Data` is immutable after publication.
+Keys and `Op.Data` are immutable after publication.
 
 Rules:
 
 - after `Apply(key, op)`, the caller must not mutate `op.Data`
+- `Apply` copies the key before publishing a new node
 - `NewPut` copies the input value
 - `NewInc` creates an owned varint buffer
-- `Read` and `Iter` return zero-copy views
+- `Read` returns a zero-copy `Op.Data` view
+- `Iter` returns detached key copies and zero-copy `Op.Data` views
 - callers must not mutate `Op.Data` returned by `Read` or `Iter`
 - `SafeRead` and `SafeIter` return owned copies
 

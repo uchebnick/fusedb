@@ -2,28 +2,29 @@ package skiplist
 
 import (
 	"encoding/binary"
+	"fusedb/internal/ops"
 	"sync/atomic"
 	"testing"
 )
 
-var benchOpSink Op
+var benchOpSink ops.Op
 
 func BenchmarkMergeIncReuse(b *testing.B) {
-	op := NewInc(0)
-	inc := NewInc(1)
+	op := ops.NewInc(0)
+	inc := ops.NewInc(1)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		op = MergeInc(op, inc)
+		op = ops.MergeInc(op, inc)
 	}
 
 	benchOpSink = op
 }
 
 func BenchmarkMergeIncReuseMaxCap(b *testing.B) {
-	op := NewInc(0)
-	inc := NewInc(1)
+	op := ops.NewInc(0)
+	inc := ops.NewInc(1)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -35,8 +36,8 @@ func BenchmarkMergeIncReuseMaxCap(b *testing.B) {
 }
 
 func BenchmarkMergeIncAllocate(b *testing.B) {
-	op := NewInc(0)
-	inc := NewInc(1)
+	op := ops.NewInc(0)
+	inc := ops.NewInc(1)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -48,49 +49,49 @@ func BenchmarkMergeIncAllocate(b *testing.B) {
 }
 
 func BenchmarkMergeIncGrowExactCap(b *testing.B) {
-	inc := NewInc(1)
+	inc := ops.NewInc(1)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		op := NewInc(int64(i))
+		op := ops.NewInc(int64(i))
 		op.Data = op.Data[:len(op.Data):len(op.Data)]
-		benchOpSink = MergeInc(op, inc)
+		benchOpSink = ops.MergeInc(op, inc)
 	}
 }
 
 func BenchmarkMergeIncGrowMaxCap(b *testing.B) {
-	inc := NewInc(1)
+	inc := ops.NewInc(1)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		op := NewInc(int64(i))
+		op := ops.NewInc(int64(i))
 		op.Data = op.Data[:len(op.Data):len(op.Data)]
 		benchOpSink = mergeIncMaxCap(op, inc)
 	}
 }
 
-func mergeIncAllocate(op1, op2 Op) Op {
-	return NewInc(DecodeInc(op1) + DecodeInc(op2))
+func mergeIncAllocate(op1, op2 ops.Op) ops.Op {
+	return ops.NewInc(ops.DecodeInc(op1) + ops.DecodeInc(op2))
 }
 
-func mergeIncMaxCap(op1, op2 Op) Op {
-	sum := DecodeInc(op1) + DecodeInc(op2)
+func mergeIncMaxCap(op1, op2 ops.Op) ops.Op {
+	sum := ops.DecodeInc(op1) + ops.DecodeInc(op2)
 	if cap(op1.Data) < binary.MaxVarintLen64 {
 		op1.Data = make([]byte, binary.MaxVarintLen64)
 	}
 	n := binary.PutVarint(op1.Data[:binary.MaxVarintLen64], sum)
-	op1.Kind = OpInc
+	op1.Kind = ops.OpInc
 	op1.Data = op1.Data[:n]
 	return op1
 }
 
 func BenchmarkCoalesceCopyOldPtr(b *testing.B) {
-	var ptr atomic.Pointer[Op]
-	initial := NewInc(0)
+	var ptr atomic.Pointer[ops.Op]
+	initial := ops.NewInc(0)
 	ptr.Store(&initial)
-	next := NewInc(1)
+	next := ops.NewInc(1)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -106,10 +107,10 @@ func BenchmarkCoalesceCopyOldPtr(b *testing.B) {
 }
 
 func BenchmarkCoalesceReuseNextScratch(b *testing.B) {
-	var ptr atomic.Pointer[Op]
-	initial := NewInc(0)
+	var ptr atomic.Pointer[ops.Op]
+	initial := ops.NewInc(0)
 	ptr.Store(&initial)
-	next := NewInc(1)
+	next := ops.NewInc(1)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -124,15 +125,15 @@ func BenchmarkCoalesceReuseNextScratch(b *testing.B) {
 	benchOpSink = *ptr.Load()
 }
 
-func coalesceReuseNextScratch(old Op, next Op) Op {
+func coalesceReuseNextScratch(old ops.Op, next ops.Op) ops.Op {
 	switch next.Kind {
-	case OpPut, OpDelete:
+	case ops.OpPut, ops.OpDelete:
 		return next
-	case OpInc:
-		if old.Kind != OpInc {
+	case ops.OpInc:
+		if old.Kind != ops.OpInc {
 			return next
 		}
-		sum := DecodeInc(old) + DecodeInc(next)
+		sum := ops.DecodeInc(old) + ops.DecodeInc(next)
 		n := putIncInto(&next, sum)
 		next.Data = next.Data[:n]
 		return next
@@ -141,10 +142,10 @@ func coalesceReuseNextScratch(old Op, next Op) Op {
 	}
 }
 
-func putIncInto(dst *Op, delta int64) int {
+func putIncInto(dst *ops.Op, delta int64) int {
 	if cap(dst.Data) < binary.MaxVarintLen64 {
 		dst.Data = make([]byte, binary.MaxVarintLen64)
 	}
-	dst.Kind = OpInc
+	dst.Kind = ops.OpInc
 	return binary.PutVarint(dst.Data[:binary.MaxVarintLen64], delta)
 }

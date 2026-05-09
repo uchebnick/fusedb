@@ -1,7 +1,9 @@
 package skiplist
 
 import (
+	"bytes"
 	"fmt"
+	"fusedb/internal/ops"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,8 +23,8 @@ func TestConcurrentPutReadDifferentKeys(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
 				key := fmt.Sprintf("worker:%02d:key:%04d", worker, i)
-				list.Apply(key, NewPut([]byte("value")))
-				if _, ok := list.Read(key); !ok {
+				list.Apply([]byte(key), ops.NewPut([]byte("value")))
+				if _, ok := list.Read([]byte(key)); !ok {
 					t.Errorf("read %s: not found", key)
 					return
 				}
@@ -57,13 +59,13 @@ func TestConcurrentMixedOperationsRace(t *testing.T) {
 				key := fmt.Sprintf("key:%02d", (worker+i)%keyCount)
 				switch i % 4 {
 				case 0:
-					list.Apply(key, NewPut([]byte("value")))
+					list.Apply([]byte(key), ops.NewPut([]byte("value")))
 				case 1:
-					list.Apply(key, NewInc(1))
+					list.Apply([]byte(key), ops.NewInc(1))
 				case 2:
-					list.Apply(key, NewDelete())
+					list.Apply([]byte(key), ops.NewDelete())
 				default:
-					_, _ = list.SafeRead(key)
+					_, _ = list.SafeRead([]byte(key))
 				}
 			}
 		}()
@@ -77,7 +79,7 @@ func TestConcurrentMixedOperationsRace(t *testing.T) {
 
 func TestConcurrentReadWhileInc(t *testing.T) {
 	list := NewSkipList(42)
-	list.Apply("counter", NewInc(0))
+	list.Apply([]byte("counter"), ops.NewInc(0))
 
 	const writers = 4
 	const readers = 4
@@ -91,16 +93,16 @@ func TestConcurrentReadWhileInc(t *testing.T) {
 		go func() {
 			defer readerWG.Done()
 			for !stop.Load() {
-				op, ok := list.Read("counter")
+				op, ok := list.Read([]byte("counter"))
 				if !ok {
 					t.Errorf("read counter: not found")
 					return
 				}
-				if op.Kind != OpInc {
+				if op.Kind != ops.OpInc {
 					t.Errorf("read counter kind = %d, want inc", op.Kind)
 					return
 				}
-				_ = DecodeInc(op)
+				_ = ops.DecodeInc(op)
 			}
 		}()
 	}
@@ -111,7 +113,7 @@ func TestConcurrentReadWhileInc(t *testing.T) {
 		go func() {
 			defer writerWG.Done()
 			for j := 0; j < perWriter; j++ {
-				list.Apply("counter", NewInc(1))
+				list.Apply([]byte("counter"), ops.NewInc(1))
 			}
 		}()
 	}
@@ -119,12 +121,12 @@ func TestConcurrentReadWhileInc(t *testing.T) {
 	stop.Store(true)
 	readerWG.Wait()
 
-	op, ok := list.Read("counter")
+	op, ok := list.Read([]byte("counter"))
 	if !ok {
 		t.Fatal("read counter: not found")
 	}
 	want := int64(writers * perWriter)
-	if delta := DecodeInc(op); delta != want {
+	if delta := ops.DecodeInc(op); delta != want {
 		t.Fatalf("counter delta = %d, want %d", delta, want)
 	}
 	if got := list.DataBytes(); got != int64(len(op.Data)) {
@@ -135,7 +137,7 @@ func TestConcurrentReadWhileInc(t *testing.T) {
 func TestConcurrentIterWhileWriting(t *testing.T) {
 	list := NewSkipList(42)
 	for i := 0; i < 128; i++ {
-		list.Apply(fmt.Sprintf("seed:%03d", i), NewPut([]byte("value")))
+		list.Apply([]byte(fmt.Sprintf("seed:%03d", i)), ops.NewPut([]byte("value")))
 	}
 
 	const writers = 4
@@ -149,13 +151,13 @@ func TestConcurrentIterWhileWriting(t *testing.T) {
 		go func() {
 			defer readerWG.Done()
 			for !stop.Load() {
-				last := ""
+				var last []byte
 				for key, op := range list.Iter() {
-					if last != "" && key < last {
+					if last != nil && bytes.Compare(key, last) < 0 {
 						t.Errorf("iterator order: %q before %q", key, last)
 						return
 					}
-					if op.Kind > OpInc {
+					if op.Kind > ops.OpInc {
 						t.Errorf("bad op kind: %d", op.Kind)
 						return
 					}
@@ -173,7 +175,7 @@ func TestConcurrentIterWhileWriting(t *testing.T) {
 			defer writerWG.Done()
 			for i := 0; i < iterations; i++ {
 				key := fmt.Sprintf("writer:%02d:key:%04d", worker, i)
-				list.Apply(key, NewPut([]byte("value")))
+				list.Apply([]byte(key), ops.NewPut([]byte("value")))
 			}
 		}()
 	}
@@ -184,27 +186,27 @@ func TestConcurrentIterWhileWriting(t *testing.T) {
 
 func TestSafeAPIsReturnOwnedData(t *testing.T) {
 	list := NewSkipList(42)
-	list.Apply("alpha", NewPut([]byte("stable")))
+	list.Apply([]byte("alpha"), ops.NewPut([]byte("stable")))
 
-	valueOp, ok := list.SafeRead("alpha")
+	valueOp, ok := list.SafeRead([]byte("alpha"))
 	if !ok {
 		t.Fatal("safe read alpha: not found")
 	}
 	valueOp.Data[0] = 'X'
 
-	op, ok := list.SafeRead("alpha")
+	op, ok := list.SafeRead([]byte("alpha"))
 	if !ok {
 		t.Fatal("safe read alpha: not found")
 	}
 	op.Data[0] = 'Y'
 
 	for _, safeOp := range list.SafeIter() {
-		if safeOp.Kind == OpPut {
+		if safeOp.Kind == ops.OpPut {
 			safeOp.Data[0] = 'Z'
 		}
 	}
 
-	again, ok := list.SafeRead("alpha")
+	again, ok := list.SafeRead([]byte("alpha"))
 	if !ok {
 		t.Fatal("safe read alpha again: not found")
 	}

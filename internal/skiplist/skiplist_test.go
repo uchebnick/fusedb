@@ -3,6 +3,7 @@ package skiplist
 import (
 	"bytes"
 	"fmt"
+	"fusedb/internal/ops"
 	"sync"
 	"testing"
 )
@@ -10,15 +11,15 @@ import (
 func TestReadPut(t *testing.T) {
 	list := NewSkipList(42)
 
-	list.Apply("beta", NewPut([]byte("2")))
-	list.Apply("alpha", NewPut([]byte("1")))
-	list.Apply("gamma", NewPut([]byte("3")))
+	list.Apply([]byte("beta"), ops.NewPut([]byte("2")))
+	list.Apply([]byte("alpha"), ops.NewPut([]byte("1")))
+	list.Apply([]byte("gamma"), ops.NewPut([]byte("3")))
 
-	got, ok := list.Read("alpha")
+	got, ok := list.Read([]byte("alpha"))
 	if !ok {
 		t.Fatal("read alpha: not found")
 	}
-	if got.Kind != OpPut || !bytes.Equal(got.Data, []byte("1")) {
+	if got.Kind != ops.OpPut || !bytes.Equal(got.Data, []byte("1")) {
 		t.Fatalf("read alpha = %#v, want put(1)", got)
 	}
 	if list.Len() != 3 {
@@ -29,31 +30,31 @@ func TestReadPut(t *testing.T) {
 func TestOperationAPI(t *testing.T) {
 	list := NewSkipList(42)
 
-	list.Apply("alpha", NewPut([]byte("1")))
-	op, ok := list.SafeRead("alpha")
-	if !ok || op.Kind != OpPut || !bytes.Equal(op.Data, []byte("1")) {
+	list.Apply([]byte("alpha"), ops.NewPut([]byte("1")))
+	op, ok := list.SafeRead([]byte("alpha"))
+	if !ok || op.Kind != ops.OpPut || !bytes.Equal(op.Data, []byte("1")) {
 		t.Fatalf("safe read alpha = %#v, %v; want put(1), true", op, ok)
 	}
 
 	op.Data[0] = 'X'
-	again, ok := list.SafeRead("alpha")
-	if !ok || again.Kind != OpPut || string(again.Data) != "1" {
+	again, ok := list.SafeRead([]byte("alpha"))
+	if !ok || again.Kind != ops.OpPut || string(again.Data) != "1" {
 		t.Fatalf("safe read alpha after mutation = %#v, %v; want put(1), true", again, ok)
 	}
 
-	list.Apply("alpha", NewDelete())
-	op, ok = list.Read("alpha")
-	if !ok || op.Kind != OpDelete {
+	list.Apply([]byte("alpha"), ops.NewDelete())
+	op, ok = list.Read([]byte("alpha"))
+	if !ok || op.Kind != ops.OpDelete {
 		t.Fatalf("read deleted alpha = %#v, %v; want delete, true", op, ok)
 	}
 
-	list.Apply("counter", NewInc(2))
-	list.Apply("counter", NewInc(3))
-	op, ok = list.Read("counter")
+	list.Apply([]byte("counter"), ops.NewInc(2))
+	list.Apply([]byte("counter"), ops.NewInc(3))
+	op, ok = list.Read([]byte("counter"))
 	if !ok {
 		t.Fatal("read counter: not found")
 	}
-	if delta := DecodeInc(op); delta != 5 {
+	if delta := ops.DecodeInc(op); delta != 5 {
 		t.Fatalf("counter delta = %d, want 5", delta)
 	}
 }
@@ -61,32 +62,32 @@ func TestOperationAPI(t *testing.T) {
 func TestDataBytesTracksMutations(t *testing.T) {
 	list := NewSkipList(42)
 
-	list.Apply("alpha", NewPut([]byte("12345")))
+	list.Apply([]byte("alpha"), ops.NewPut([]byte("12345")))
 	if got, want := list.DataBytes(), int64(5); got != want {
 		t.Fatalf("data bytes after insert = %d, want %d", got, want)
 	}
 
-	list.Apply("alpha", NewPut([]byte("123456789")))
+	list.Apply([]byte("alpha"), ops.NewPut([]byte("123456789")))
 	if got, want := list.DataBytes(), int64(9); got != want {
 		t.Fatalf("data bytes after update = %d, want %d", got, want)
 	}
 
-	list.Apply("beta", NewPut([]byte("12")))
+	list.Apply([]byte("beta"), ops.NewPut([]byte("12")))
 	if got, want := list.DataBytes(), int64(11); got != want {
 		t.Fatalf("data bytes after second insert = %d, want %d", got, want)
 	}
 
-	list.Apply("alpha", NewDelete())
+	list.Apply([]byte("alpha"), ops.NewDelete())
 	if got, want := list.DataBytes(), int64(2); got != want {
 		t.Fatalf("data bytes after delete = %d, want %d", got, want)
 	}
 
-	list.Apply("counter", NewInc(1))
+	list.Apply([]byte("counter"), ops.NewInc(1))
 	if got, want := list.DataBytes(), int64(3); got != want {
 		t.Fatalf("data bytes after inc insert = %d, want %d", got, want)
 	}
 
-	list.Apply("counter", NewInc(127))
+	list.Apply([]byte("counter"), ops.NewInc(127))
 	if got, want := list.DataBytes(), int64(4); got != want {
 		t.Fatalf("data bytes after inc coalesce = %d, want %d", got, want)
 	}
@@ -95,10 +96,10 @@ func TestDataBytesTracksMutations(t *testing.T) {
 func TestReadMissing(t *testing.T) {
 	list := NewSkipList(42)
 
-	list.Apply("alpha", NewPut([]byte("1")))
-	list.Apply("gamma", NewPut([]byte("3")))
+	list.Apply([]byte("alpha"), ops.NewPut([]byte("1")))
+	list.Apply([]byte("gamma"), ops.NewPut([]byte("3")))
 
-	if got, ok := list.Read("beta"); ok {
+	if got, ok := list.Read([]byte("beta")); ok {
 		t.Fatalf("read beta = %#v, want not found", got)
 	}
 }
@@ -106,15 +107,15 @@ func TestReadMissing(t *testing.T) {
 func TestReadReturnsCopy(t *testing.T) {
 	list := NewSkipList(42)
 
-	list.Apply("alpha", NewPut([]byte("stable")))
+	list.Apply([]byte("alpha"), ops.NewPut([]byte("stable")))
 
-	got, ok := list.SafeRead("alpha")
+	got, ok := list.SafeRead([]byte("alpha"))
 	if !ok {
 		t.Fatal("read alpha: not found")
 	}
 	got.Data[0] = 'X'
 
-	again, ok := list.SafeRead("alpha")
+	again, ok := list.SafeRead([]byte("alpha"))
 	if !ok {
 		t.Fatal("read alpha again: not found")
 	}
@@ -126,14 +127,14 @@ func TestReadReturnsCopy(t *testing.T) {
 func TestReadDeleteTombstone(t *testing.T) {
 	list := NewSkipList(42)
 
-	list.Apply("alpha", NewPut([]byte("1")))
-	list.Apply("alpha", NewDelete())
+	list.Apply([]byte("alpha"), ops.NewPut([]byte("1")))
+	list.Apply([]byte("alpha"), ops.NewDelete())
 
-	got, ok := list.Read("alpha")
+	got, ok := list.Read([]byte("alpha"))
 	if !ok {
 		t.Fatal("read alpha tombstone: not found")
 	}
-	if got.Kind != OpDelete {
+	if got.Kind != ops.OpDelete {
 		t.Fatalf("read alpha kind = %d, want delete", got.Kind)
 	}
 	if list.Len() != 1 {
@@ -144,17 +145,17 @@ func TestReadDeleteTombstone(t *testing.T) {
 func TestReadCoalescedInc(t *testing.T) {
 	list := NewSkipList(42)
 
-	list.Apply("counter", NewInc(2))
-	list.Apply("counter", NewInc(3))
+	list.Apply([]byte("counter"), ops.NewInc(2))
+	list.Apply([]byte("counter"), ops.NewInc(3))
 
-	got, ok := list.Read("counter")
+	got, ok := list.Read([]byte("counter"))
 	if !ok {
 		t.Fatal("read counter: not found")
 	}
-	if got.Kind != OpInc {
+	if got.Kind != ops.OpInc {
 		t.Fatalf("read counter kind = %d, want inc", got.Kind)
 	}
-	if delta := DecodeInc(got); delta != 5 {
+	if delta := ops.DecodeInc(got); delta != 5 {
 		t.Fatalf("read counter delta = %d, want 5", delta)
 	}
 	if list.Len() != 1 {
@@ -173,18 +174,18 @@ func TestConcurrentIncCoalesces(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < perGoroutine; j++ {
-				list.Apply("counter", NewInc(1))
+				list.Apply([]byte("counter"), ops.NewInc(1))
 			}
 		}()
 	}
 	wg.Wait()
 
-	got, ok := list.Read("counter")
+	got, ok := list.Read([]byte("counter"))
 	if !ok {
 		t.Fatal("read counter: not found")
 	}
 	want := int64(goroutines * perGoroutine)
-	if delta := DecodeInc(got); delta != want {
+	if delta := ops.DecodeInc(got); delta != want {
 		t.Fatalf("read counter delta = %d, want %d", delta, want)
 	}
 	if list.Len() != 1 {
@@ -197,7 +198,7 @@ func makeBenchmarkSkipList(b *testing.B, n int) *SkipList {
 
 	list := NewSkipList(42)
 	for i := 0; i < n; i++ {
-		list.Apply(fmt.Sprintf("key:%08d", i), NewPut([]byte("value")))
+		list.Apply([]byte(fmt.Sprintf("key:%08d", i)), ops.NewPut([]byte("value")))
 	}
 	if list.Len() != int64(n) {
 		b.Fatalf("len = %d, want %d", list.Len(), n)
@@ -212,8 +213,8 @@ func BenchmarkReadHit1K(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		op, ok := list.Read(key)
-		if !ok || op.Kind != OpPut {
+		op, ok := list.Read([]byte(key))
+		if !ok || op.Kind != ops.OpPut {
 			b.Fatal("read hit failed")
 		}
 		benchOpSink = op
@@ -227,7 +228,7 @@ func BenchmarkReadMiss1K(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		op, ok := list.Read(key)
+		op, ok := list.Read([]byte(key))
 		if ok {
 			b.Fatal("read miss found key")
 		}
@@ -242,8 +243,8 @@ func BenchmarkReadHit64K(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		op, ok := list.Read(key)
-		if !ok || op.Kind != OpPut {
+		op, ok := list.Read([]byte(key))
+		if !ok || op.Kind != ops.OpPut {
 			b.Fatal("read hit failed")
 		}
 		benchOpSink = op
@@ -269,8 +270,8 @@ func BenchmarkReadHitPositions64K(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				op, ok := list.Read(key)
-				if !ok || op.Kind != OpPut {
+				op, ok := list.Read([]byte(key))
+				if !ok || op.Kind != ops.OpPut {
 					b.Fatal("read hit failed")
 				}
 				benchOpSink = op
@@ -290,8 +291,8 @@ func BenchmarkReadHitRotating64K(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		key := keys[i&(len(keys)-1)]
-		op, ok := list.Read(key)
-		if !ok || op.Kind != OpPut {
+		op, ok := list.Read([]byte(key))
+		if !ok || op.Kind != ops.OpPut {
 			b.Fatal("read hit failed")
 		}
 		benchOpSink = op
@@ -305,7 +306,7 @@ func BenchmarkReadMiss64K(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		op, ok := list.Read(key)
+		op, ok := list.Read([]byte(key))
 		if ok {
 			b.Fatal("read miss found key")
 		}
@@ -332,8 +333,8 @@ func BenchmarkReadBatch10Keys64K(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for _, key := range keys {
-			op, ok := list.Read(key)
-			if !ok || op.Kind != OpPut {
+			op, ok := list.Read([]byte(key))
+			if !ok || op.Kind != ops.OpPut {
 				b.Fatal("read hit failed")
 			}
 			benchOpSink = op
@@ -352,8 +353,8 @@ func BenchmarkReadBatch100Keys64K(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for _, key := range keys {
-			op, ok := list.Read(key)
-			if !ok || op.Kind != OpPut {
+			op, ok := list.Read([]byte(key))
+			if !ok || op.Kind != ops.OpPut {
 				b.Fatal("read hit failed")
 			}
 			benchOpSink = op
@@ -369,7 +370,7 @@ func BenchmarkIterFull1K(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		count := 0
 		for key, op := range list.Iter() {
-			if key == "" || op.Kind != OpPut {
+			if len(key) == 0 || op.Kind != ops.OpPut {
 				b.Fatal("bad iterator entry")
 			}
 			count++
@@ -389,7 +390,7 @@ func BenchmarkSafeIterFull1K(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		count := 0
 		for key, op := range list.SafeIter() {
-			if key == "" || op.Kind != OpPut {
+			if len(key) == 0 || op.Kind != ops.OpPut {
 				b.Fatal("bad iterator entry")
 			}
 			count++
@@ -409,7 +410,7 @@ func BenchmarkIterFull64K(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		count := 0
 		for key, op := range list.Iter() {
-			if key == "" || op.Kind != OpPut {
+			if len(key) == 0 || op.Kind != ops.OpPut {
 				b.Fatal("bad iterator entry")
 			}
 			count++
@@ -429,7 +430,7 @@ func BenchmarkSafeIterFull64K(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		count := 0
 		for key, op := range list.SafeIter() {
-			if key == "" || op.Kind != OpPut {
+			if len(key) == 0 || op.Kind != ops.OpPut {
 				b.Fatal("bad iterator entry")
 			}
 			count++
@@ -449,7 +450,7 @@ func BenchmarkIterFirst100Of64K(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		count := 0
 		for key, op := range list.Iter() {
-			if key == "" || op.Kind != OpPut {
+			if len(key) == 0 || op.Kind != ops.OpPut {
 				b.Fatal("bad iterator entry")
 			}
 			count++
@@ -472,7 +473,7 @@ func BenchmarkSafeIterFirst100Of64K(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		count := 0
 		for key, op := range list.SafeIter() {
-			if key == "" || op.Kind != OpPut {
+			if len(key) == 0 || op.Kind != ops.OpPut {
 				b.Fatal("bad iterator entry")
 			}
 			count++
@@ -494,42 +495,42 @@ func BenchmarkApplyInsertSequential(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		list.Apply(fmt.Sprintf("key:%08d", i), NewPut(value))
+		list.Apply([]byte(fmt.Sprintf("key:%08d", i)), ops.NewPut(value))
 	}
 }
 
 func BenchmarkApplyPutExisting(b *testing.B) {
 	list := NewSkipList(42)
 	value := []byte("value")
-	list.Apply("key:00000001", NewPut(value))
+	list.Apply([]byte("key:00000001"), ops.NewPut(value))
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		list.Apply("key:00000001", NewPut(value))
+		list.Apply([]byte("key:00000001"), ops.NewPut(value))
 	}
 }
 
 func BenchmarkApplyIncExisting(b *testing.B) {
 	list := NewSkipList(42)
-	list.Apply("counter", NewInc(0))
+	list.Apply([]byte("counter"), ops.NewInc(0))
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		list.Apply("counter", NewInc(1))
+		list.Apply([]byte("counter"), ops.NewInc(1))
 	}
 }
 
 func BenchmarkApplyIncExistingParallel(b *testing.B) {
 	list := NewSkipList(42)
-	list.Apply("counter", NewInc(0))
+	list.Apply([]byte("counter"), ops.NewInc(0))
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			list.Apply("counter", NewInc(1))
+			list.Apply([]byte("counter"), ops.NewInc(1))
 		}
 	})
 }

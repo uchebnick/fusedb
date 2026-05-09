@@ -1,10 +1,13 @@
 package skiplist
 
-import "testing"
+import (
+	"fusedb/internal/ops"
+	"testing"
+)
 
 func TestMergeInc(t *testing.T) {
-	got := MergeInc(NewInc(2), NewInc(3))
-	if delta := DecodeInc(got); delta != 5 {
+	got := ops.MergeInc(ops.NewInc(2), ops.NewInc(3))
+	if delta := ops.DecodeInc(got); delta != 5 {
 		t.Fatalf("merged inc = %d, want 5", delta)
 	}
 }
@@ -12,8 +15,8 @@ func TestMergeInc(t *testing.T) {
 func TestRandomHeightFromHashIsDeterministic(t *testing.T) {
 	list := NewSkipList(42)
 
-	first := list.randomHeight("account:100500")
-	second := list.randomHeight("account:100500")
+	first := list.randomHeight([]byte("account:100500"))
+	second := list.randomHeight([]byte("account:100500"))
 	if first != second {
 		t.Fatalf("height changed for same key: %d != %d", first, second)
 	}

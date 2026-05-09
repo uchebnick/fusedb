@@ -1,15 +1,18 @@
 package skiplist
 
 import (
+	"bytes"
 	"iter"
 	"sync/atomic"
+
+	"fusedb/internal/ops"
 
 	"github.com/cespare/xxhash/v2"
 )
 
 const maxHeight = 20
 
-// SkipList is an ordered in-memory mutation index for string keys.
+// SkipList is an ordered in-memory mutation index for byte keys.
 //
 // It stores Op values, keeps deletes as tombstones, and never physically
 // removes active nodes. The structure is intended for internal buffer/memtable
@@ -24,8 +27,8 @@ type SkipList struct {
 
 // node is one published skiplist node.
 type node struct {
-	key  string
-	op   atomic.Pointer[Op]
+	key  []byte
+	op   atomic.Pointer[ops.Op]
 	next []atomic.Pointer[node]
 }
 
@@ -66,17 +69,18 @@ func (s *SkipList) DataBytes() int64 {
 
 // Apply publishes op for key.
 //
-// The caller must treat op.Data as immutable after this call. If key already
-// exists, Apply publishes a new coalesced Op without relinking the node. If key
-// does not exist, Apply inserts a new node and links level 0 before publishing
-// upper levels.
-func (s *SkipList) Apply(key string, op Op) {
+// The caller must not mutate key while Apply is running and must treat op.Data
+// as immutable after this call. If key already exists, Apply publishes a new
+// coalesced Op without relinking the node. If key does not exist, Apply inserts
+// a new node with an owned key copy and links level 0 before publishing upper
+// levels.
+func (s *SkipList) Apply(key []byte, op ops.Op) {
 	var prevList, nextList [maxHeight]*node
 
 	for {
 		s.findSplice(key, &prevList, &nextList)
 
-		if next := nextList[0]; next != nil && next.key == key {
+		if next := nextList[0]; next != nil && bytes.Equal(next.key, key) {
 			s.updateNode(next, op)
 			return
 		}
@@ -101,45 +105,46 @@ func (s *SkipList) Apply(key string, op Op) {
 //
 // The returned Op is a view of immutable skiplist-owned data. Callers must not
 // mutate returned Op.Data. Use SafeRead when the caller needs an owned copy.
-func (s *SkipList) Read(key string) (Op, bool) {
+func (s *SkipList) Read(key []byte) (ops.Op, bool) {
 	_, next := s.findSpliceAtLevel(key, 0)
 
-	if next == nil || next.key != key {
-		return Op{}, false
+	if next == nil || !bytes.Equal(next.key, key) {
+		return ops.Op{}, false
 	}
 
 	op := next.op.Load()
 	if op == nil {
-		return Op{}, false
+		return ops.Op{}, false
 	}
 
 	return *op, true
 }
 
 // SafeRead returns the current Op for key with an owned copy of Op.Data.
-func (s *SkipList) SafeRead(key string) (Op, bool) {
+func (s *SkipList) SafeRead(key []byte) (ops.Op, bool) {
 	op, ok := s.Read(key)
 	if !ok {
-		return Op{}, false
+		return ops.Op{}, false
 	}
 
-	return *op.copy(), true
+	return op.Clone(), true
 }
 
-// Iter returns a zero-copy ordered iterator over all live skiplist nodes.
+// Iter returns an ordered iterator over all live skiplist nodes.
 //
-// Deletes are yielded as OpDelete tombstones. Returned Op.Data shares storage
-// with the skiplist and must not be mutated by the caller. Use SafeIter when
-// the caller needs owned Op.Data buffers.
-func (s *SkipList) Iter() iter.Seq2[string, Op] {
-	return func(yield func(string, Op) bool) {
+// Deletes are yielded as OpDelete tombstones. Returned keys are detached
+// copies. Returned Op.Data shares storage with the skiplist and must not be
+// mutated by the caller. Use SafeIter when the caller needs owned Op.Data
+// buffers.
+func (s *SkipList) Iter() iter.Seq2[[]byte, ops.Op] {
+	return func(yield func([]byte, ops.Op) bool) {
 		for x := s.head.next[0].Load(); x != nil; x = x.next[0].Load() {
 			op := x.op.Load()
 			if op == nil {
 				continue
 			}
 
-			if !yield(x.key, *op) {
+			if !yield(bytes.Clone(x.key), *op) {
 				return
 			}
 		}
@@ -147,19 +152,19 @@ func (s *SkipList) Iter() iter.Seq2[string, Op] {
 }
 
 // SafeIter returns an ordered iterator that copies Op.Data for every yielded Op.
-func (s *SkipList) SafeIter() iter.Seq2[string, Op] {
-	return func(yield func(string, Op) bool) {
+func (s *SkipList) SafeIter() iter.Seq2[[]byte, ops.Op] {
+	return func(yield func([]byte, ops.Op) bool) {
 		for key, op := range s.Iter() {
-			if !yield(key, *op.copy()) {
+			if !yield(key, op.Clone()) {
 				return
 			}
 		}
 	}
 }
 
-func newNode(key string, op Op, height int32) *node {
+func newNode(key []byte, op ops.Op, height int32) *node {
 	n := &node{
-		key:  key,
+		key:  bytes.Clone(key),
 		next: make([]atomic.Pointer[node], height),
 	}
 	n.op.Store(&op)
@@ -167,9 +172,9 @@ func newNode(key string, op Op, height int32) *node {
 	return n
 }
 
-func (s *SkipList) randomHeight(key string) int32 {
+func (s *SkipList) randomHeight(key []byte) int32 {
 	var h int32 = 1
-	hash := xxhash.Sum64String(key) ^ s.seed
+	hash := xxhash.Sum64(key) ^ s.seed
 
 	for h < maxHeight && (hash&3) == 0 {
 		h++
@@ -179,13 +184,13 @@ func (s *SkipList) randomHeight(key string) int32 {
 	return h
 }
 
-func (s *SkipList) findSplice(key string, prevList, nextList *[maxHeight]*node) {
+func (s *SkipList) findSplice(key []byte, prevList, nextList *[maxHeight]*node) {
 	x := s.head
 
 	for level := s.height.Load() - 1; level >= 0; level-- {
 		for {
 			next := x.next[level].Load()
-			if next == nil || next.key >= key {
+			if next == nil || bytes.Compare(next.key, key) >= 0 {
 				prevList[level] = x
 				nextList[level] = next
 				break
@@ -195,13 +200,13 @@ func (s *SkipList) findSplice(key string, prevList, nextList *[maxHeight]*node) 
 	}
 }
 
-func (s *SkipList) findSpliceAtLevel(key string, targetLevel int32) (*node, *node) {
+func (s *SkipList) findSpliceAtLevel(key []byte, targetLevel int32) (*node, *node) {
 	x := s.head
 
 	for level := s.height.Load() - 1; level >= targetLevel; level-- {
 		for {
 			next := x.next[level].Load()
-			if next == nil || next.key >= key {
+			if next == nil || bytes.Compare(next.key, key) >= 0 {
 				if level == targetLevel {
 					return x, next
 				}
@@ -214,7 +219,7 @@ func (s *SkipList) findSpliceAtLevel(key string, targetLevel int32) (*node, *nod
 	return s.head, s.head.next[targetLevel].Load()
 }
 
-func (s *SkipList) updateNode(n *node, op Op) {
+func (s *SkipList) updateNode(n *node, op ops.Op) {
 	for {
 		oldPtr := n.op.Load()
 
@@ -259,7 +264,7 @@ func (s *SkipList) publishBaseLevel(
 }
 
 func (s *SkipList) publishUpperLevels(
-	key string,
+	key []byte,
 	node *node,
 	nodeHeight int32,
 	prevList,
@@ -287,14 +292,14 @@ func (s *SkipList) growHeight(oldHeight, nodeHeight int32) {
 	}
 }
 
-func coalesceToNew(old, next Op) Op {
+func coalesceToNew(old, next ops.Op) ops.Op {
 	switch next.Kind {
-	case OpPut, OpDelete:
+	case ops.OpPut, ops.OpDelete:
 		return next
-	case OpInc:
-		if old.Kind == OpInc {
-			sum := DecodeInc(old) + DecodeInc(next)
-			return NewInc(sum)
+	case ops.OpInc:
+		if old.Kind == ops.OpInc {
+			sum := ops.DecodeInc(old) + ops.DecodeInc(next)
+			return ops.NewInc(sum)
 		}
 		return next
 	default:

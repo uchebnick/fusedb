@@ -1,4 +1,4 @@
-package skiplist
+package ops
 
 import (
 	"bytes"
@@ -19,8 +19,9 @@ const (
 
 // Op is one immutable buffered mutation.
 //
-// Once an Op is passed to SkipList, callers must not mutate Data. Use NewPut,
-// NewDelete, and NewInc to create operations with the expected ownership rules.
+// Once an Op is published into a shared structure, callers must not mutate Data.
+// Use NewPut, NewDelete, and NewInc to create operations with the expected
+// ownership rules.
 type Op struct {
 	Kind OpKind
 	Data []byte
@@ -74,8 +75,8 @@ func DecodeInc(op Op) int64 {
 // MergeIncInto merges next into dst.
 //
 // Both operations must be OpInc. This helper mutates dst and is intended for
-// local scratch values only, not for Op values already published into a
-// SkipList.
+// local scratch values only, not for Op values already published into shared
+// structures.
 func MergeIncInto(dst *Op, next Op) {
 	if dst == nil {
 		panic("nil inc dst")
@@ -98,17 +99,15 @@ func MergeInc(op1, op2 Op) Op {
 	return op1
 }
 
+// Clone returns an owned copy of op.
+func (op Op) Clone() Op {
+	return Op{
+		Kind: op.Kind,
+		Data: bytes.Clone(op.Data),
+	}
+}
+
 func varintLen64(v int64) int {
 	var buf [binary.MaxVarintLen64]byte
 	return binary.PutVarint(buf[:], v)
-}
-
-func (o *Op) copy() *Op {
-	op := &Op{
-		Kind: o.Kind,
-		Data: make([]byte, len(o.Data)),
-	}
-
-	copy(op.Data, o.Data)
-	return op
 }
