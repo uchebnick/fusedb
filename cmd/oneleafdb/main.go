@@ -24,6 +24,8 @@ func main() {
 	workloadJSONL := flag.String("workload-jsonl", "", "jsonl key/value workload; defaults to dict-samples when set")
 	enableWAL := flag.Bool("wal", false, "enable simple append-only cmd WAL")
 	walPath := flag.String("wal-path", "", "WAL path; defaults to <dir>/oneleaf.wal when -wal is set")
+	walGroupUS := flag.Int("wal-group-us", int(onedb.DefaultWALGroupCommitInterval/time.Microsecond), "WAL group commit interval in microseconds")
+	walSync := flag.Bool("wal-sync", false, "wait for WAL fsync before returning each write")
 	flag.Parse()
 
 	dbDir := *dir
@@ -65,10 +67,12 @@ func main() {
 	}
 
 	db, err := onedb.OpenDB(onedb.DBOptions{
-		Dir:            dbDir,
-		ThresholdBytes: *threshold,
-		Dictionary:     dict,
-		WALPath:        *walPath,
+		Dir:                    dbDir,
+		ThresholdBytes:         *threshold,
+		Dictionary:             dict,
+		WALPath:                *walPath,
+		WALGroupCommitInterval: time.Duration(*walGroupUS) * time.Microsecond,
+		WALSyncWrites:          *walSync,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open db: %v\n", err)

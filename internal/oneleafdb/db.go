@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"fusedb/internal/compression"
 	"fusedb/internal/disk"
@@ -11,7 +12,11 @@ import (
 	"fusedb/internal/segment"
 )
 
-const DefaultMergeThresholdBytes = 5 << 20
+const (
+	DefaultMergeThresholdBytes    = 5 << 20
+	DefaultCacheBytes             = 5 << 20
+	DefaultWALGroupCommitInterval = 200 * time.Microsecond
+)
 
 // DB is a tiny one-leaf database used for local experiments and benchmarks.
 //
@@ -26,6 +31,8 @@ type DB struct {
 	dictionary     *compression.Dictionary
 	registry       *compression.Registry
 	wal            *wal
+	cache          *valueCache
+	cacheEpoch     atomic.Uint64
 
 	leaf    *leaf.Leaf
 	mergeMu sync.Mutex
@@ -38,12 +45,16 @@ type DB struct {
 }
 
 type DBOptions struct {
-	Dir            string
-	ThresholdBytes int64
-	Seed           uint64
-	SegmentID      uint64
-	Dictionary     *compression.Dictionary
-	WALPath        string
+	Dir                    string
+	ThresholdBytes         int64
+	Seed                   uint64
+	SegmentID              uint64
+	Dictionary             *compression.Dictionary
+	WALPath                string
+	WALGroupCommitInterval time.Duration
+	WALSyncWrites          bool
+	CacheBytes             int64
+	CacheEntries           int
 }
 
 func OpenDB(opts DBOptions) (*DB, error) {
@@ -60,6 +71,14 @@ func OpenDB(opts DBOptions) (*DB, error) {
 	seed := opts.Seed
 	if seed == 0 {
 		seed = 42
+	}
+
+	cacheBytes := opts.CacheBytes
+	if cacheBytes == 0 && opts.CacheEntries > 0 {
+		cacheBytes = int64(opts.CacheEntries) * 160
+	}
+	if cacheBytes == 0 {
+		cacheBytes = DefaultCacheBytes
 	}
 
 	compressionKind := segment.CompressionNone
@@ -79,12 +98,13 @@ func OpenDB(opts DBOptions) (*DB, error) {
 		compression:    compressionKind,
 		dictionary:     opts.Dictionary,
 		registry:       registry,
+		cache:          newValueCache(cacheBytes),
 		leaf:           leaf.NewLeaf(segmentID, seed, nil, &leaf.Merger{Compression: registry}),
 		mergeNotify:    make(chan struct{}, 1),
 		mergeStop:      make(chan struct{}),
 		mergeDone:      make(chan struct{}),
 	}
-	wal, err := openWAL(opts.WALPath)
+	wal, err := openWALWithSync(opts.WALPath, opts.WALGroupCommitInterval, opts.WALSyncWrites)
 	if err != nil {
 		if registry != nil {
 			_ = registry.Close()
@@ -101,20 +121,43 @@ func (db *DB) Put(key, value []byte) error {
 	if err := db.wal.appendPut(key, value); err != nil {
 		return err
 	}
+	db.cacheEpoch.Add(1)
+	db.cache.delete(key)
 	db.leaf.Put(key, value)
+	db.cacheEpoch.Add(1)
+	db.cache.delete(key)
 	db.notifyMergeWorker()
 	return nil
 }
 
 func (db *DB) Get(key []byte) ([]byte, bool, error) {
-	return db.leaf.Get(key)
+	epoch := db.cacheEpoch.Load()
+	if value, ok := db.cache.get(key, epoch); ok {
+		return value, true, nil
+	}
+	value, ok, err := db.leaf.Get(key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		db.cache.delete(key)
+		return nil, false, nil
+	}
+	if db.cacheEpoch.Load() == epoch {
+		db.cache.set(key, value, epoch)
+	}
+	return value, true, nil
 }
 
 func (db *DB) Delete(key []byte) error {
 	if err := db.wal.appendDelete(key); err != nil {
 		return err
 	}
+	db.cacheEpoch.Add(1)
+	db.cache.delete(key)
 	db.leaf.Delete(key)
+	db.cacheEpoch.Add(1)
+	db.cache.delete(key)
 	db.notifyMergeWorker()
 	return nil
 }
@@ -123,7 +166,11 @@ func (db *DB) Inc(key []byte, delta int64) error {
 	if err := db.wal.appendInc(key, delta); err != nil {
 		return err
 	}
+	db.cacheEpoch.Add(1)
+	db.cache.delete(key)
 	db.leaf.Inc(key, delta)
+	db.cacheEpoch.Add(1)
+	db.cache.delete(key)
 	db.notifyMergeWorker()
 	return nil
 }
@@ -210,6 +257,8 @@ func (db *DB) InstallReaderForBench(reader *segment.Reader, version uint64) {
 	}
 	db.leaf = leaf.NewLeaf(db.segmentID, 42, reader, &leaf.Merger{Compression: db.registry})
 	db.version = version
+	db.cacheEpoch.Add(1)
+	db.cache.clear()
 }
 
 func (db *DB) notifyMergeWorker() {
