@@ -3,7 +3,9 @@ package leaf
 import (
 	"iter"
 	"sync"
+	"sync/atomic"
 
+	"fusedb/internal/ops"
 	"fusedb/internal/skiplist"
 )
 
@@ -12,47 +14,35 @@ import (
 // Buffer is intentionally thin: it owns the ergonomic mutation API for a leaf,
 // while skiplist owns the ordered in-memory operation index.
 type Buffer struct {
-	mu   sync.RWMutex
-	seed uint64
-	ops  *skiplist.SkipList
-}
-
-// ImmutableOps is a read-only snapshot of buffer operations.
-//
-// It is returned by FreezeOps and is intended for merge code. The underlying
-// skiplist is no longer reachable by Buffer writes after FreezeOps returns.
-type ImmutableOps struct {
-	ops *skiplist.SkipList
+	freezeMu sync.Mutex
+	seed     uint64
+	active   atomic.Pointer[skiplist.SkipList]
+	frozen   atomic.Pointer[skiplist.SkipList]
 }
 
 // NewBuffer creates an empty leaf mutation buffer.
 //
 // The seed is passed through to the underlying skiplist height selection.
 func NewBuffer(seed uint64) *Buffer {
-	return &Buffer{
+	buffer := &Buffer{
 		seed: seed,
-		ops:  skiplist.NewSkipList(seed),
 	}
+	buffer.active.Store(skiplist.NewSkipList(seed))
+	return buffer
 }
 
 // Len returns the number of unique keys currently represented in the buffer.
 //
 // Delete tombstones are counted because they are still buffered operations.
 func (b *Buffer) Len() int64 {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	return b.ops.Len()
+	return b.activeList().Len()
 }
 
 // DataBytes returns the total byte length of Op.Data payloads in the buffer.
 //
 // Delete tombstones contribute zero data bytes.
 func (b *Buffer) DataBytes() int64 {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	return b.ops.DataBytes()
+	return b.activeList().DataBytes()
 }
 
 // EstimatedBytes returns the current buffered data payload size.
@@ -65,141 +55,129 @@ func (b *Buffer) EstimatedBytes() int64 {
 
 // Apply publishes op for key.
 //
-// Callers must treat op.Data as immutable after Apply returns.
-func (b *Buffer) Apply(key string, op skiplist.Op) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	b.ops.Apply(key, op)
+// Callers must not mutate key while Apply is running and must treat op.Data as
+// immutable after Apply returns.
+func (b *Buffer) Apply(key []byte, op ops.Op) {
+	b.activeList().Apply(key, op)
 }
 
 // Put buffers a value replacement for key.
 //
 // Put copies value before publishing it.
-func (b *Buffer) Put(key string, value []byte) {
-	b.Apply(key, skiplist.NewPut(value))
+func (b *Buffer) Put(key []byte, value []byte) {
+	b.Apply(key, ops.NewPut(value))
 }
 
 // Delete buffers a delete tombstone for key.
-func (b *Buffer) Delete(key string) {
-	b.Apply(key, skiplist.NewDelete())
+func (b *Buffer) Delete(key []byte) {
+	b.Apply(key, ops.NewDelete())
 }
 
 // Inc buffers a signed counter increment for key.
-func (b *Buffer) Inc(key string, delta int64) {
-	b.Apply(key, skiplist.NewInc(delta))
+func (b *Buffer) Inc(key []byte, delta int64) {
+	b.Apply(key, ops.NewInc(delta))
 }
 
 // ReadOp returns the buffered operation for key without copying Op.Data.
 //
 // The returned Op is a zero-copy view of immutable buffer-owned data. Callers
 // must not mutate returned Op.Data. Use SafeReadOp when an owned copy is needed.
-func (b *Buffer) ReadOp(key string) (skiplist.Op, bool) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	return b.ops.Read(key)
+func (b *Buffer) ReadOp(key []byte) (ops.Op, bool) {
+	if op, ok := b.activeList().Read(key); ok {
+		return op, true
+	}
+	if frozen := b.frozen.Load(); frozen != nil {
+		return frozen.Read(key)
+	}
+	return ops.Op{}, false
 }
 
 // SafeReadOp returns the buffered operation for key with an owned Op.Data copy.
-func (b *Buffer) SafeReadOp(key string) (skiplist.Op, bool) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	return b.ops.SafeRead(key)
+func (b *Buffer) SafeReadOp(key []byte) (ops.Op, bool) {
+	if op, ok := b.activeList().SafeRead(key); ok {
+		return op, true
+	}
+	if frozen := b.frozen.Load(); frozen != nil {
+		return frozen.SafeRead(key)
+	}
+	return ops.Op{}, false
 }
 
 // IterOps returns a zero-copy ordered iterator over buffered operations.
 //
 // This is the intended iterator for leaf merge code. Callers must not mutate
 // returned Op.Data.
-func (b *Buffer) IterOps() iter.Seq2[string, skiplist.Op] {
-	b.mu.RLock()
-	ops := b.ops
-	b.mu.RUnlock()
-
-	return ops.Iter()
+func (b *Buffer) IterOps() iter.Seq2[[]byte, ops.Op] {
+	return b.activeList().Iter()
 }
 
 // SafeIterOps returns an ordered iterator that copies Op.Data for every entry.
-func (b *Buffer) SafeIterOps() iter.Seq2[string, skiplist.Op] {
-	b.mu.RLock()
-	ops := b.ops
-	b.mu.RUnlock()
-
-	return ops.SafeIter()
+func (b *Buffer) SafeIterOps() iter.Seq2[[]byte, ops.Op] {
+	return b.activeList().SafeIter()
 }
 
-// FreezeOps detaches current operations and returns them as an immutable view.
+// Freeze moves current active operations into the frozen slot.
 //
-// Writes after FreezeOps go into a fresh active skiplist. Existing in-flight
-// Apply calls complete before the snapshot is detached, so the returned
-// ImmutableOps will not receive future Buffer writes.
-func (b *Buffer) FreezeOps() *ImmutableOps {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// Writes after Freeze go into a fresh active skiplist. If frozen operations are
+// already present, Freeze returns false and leaves the buffer unchanged.
+func (b *Buffer) Freeze() bool {
+	b.freezeMu.Lock()
+	defer b.freezeMu.Unlock()
 
-	ops := b.ops
-	b.ops = skiplist.NewSkipList(b.seed)
-
-	return &ImmutableOps{
-		ops: ops,
+	if b.frozen.Load() != nil {
+		return false
 	}
+	oldActive := b.active.Swap(skiplist.NewSkipList(b.seed))
+	b.frozen.Store(oldActive)
+	return true
 }
 
-// Len returns the number of unique keys represented in the immutable snapshot.
-func (i *ImmutableOps) Len() int64 {
-	if i == nil || i.ops == nil {
+// FrozenLen returns the number of unique keys in the frozen operation layer.
+func (b *Buffer) FrozenLen() int64 {
+	frozen := b.frozen.Load()
+	if frozen == nil {
 		return 0
 	}
-
-	return i.ops.Len()
+	return frozen.Len()
 }
 
-// DataBytes returns the total byte length of Op.Data payloads in the snapshot.
-func (i *ImmutableOps) DataBytes() int64 {
-	if i == nil || i.ops == nil {
-		return 0
+// ReadFrozen returns an operation from the frozen layer without copying data.
+func (b *Buffer) ReadFrozen(key []byte) (ops.Op, bool) {
+	frozen := b.frozen.Load()
+	if frozen == nil {
+		return ops.Op{}, false
 	}
-
-	return i.ops.DataBytes()
+	return frozen.Read(key)
 }
 
-// ReadOp returns an operation from the immutable snapshot without copying data.
-func (i *ImmutableOps) ReadOp(key string) (skiplist.Op, bool) {
-	if i == nil || i.ops == nil {
-		return skiplist.Op{}, false
-	}
-
-	return i.ops.Read(key)
-}
-
-// SafeReadOp returns an operation from the immutable snapshot with owned data.
-func (i *ImmutableOps) SafeReadOp(key string) (skiplist.Op, bool) {
-	if i == nil || i.ops == nil {
-		return skiplist.Op{}, false
-	}
-
-	return i.ops.SafeRead(key)
-}
-
-// IterOps returns a zero-copy ordered iterator over immutable operations.
-func (i *ImmutableOps) IterOps() iter.Seq2[string, skiplist.Op] {
-	if i == nil || i.ops == nil {
+// IterFrozen returns a zero-copy ordered iterator over frozen operations.
+func (b *Buffer) IterFrozen() iter.Seq2[[]byte, ops.Op] {
+	frozen := b.frozen.Load()
+	if frozen == nil {
 		return emptyOpsIter
 	}
-
-	return i.ops.Iter()
+	return frozen.Iter()
 }
 
-// SafeIterOps returns an ordered iterator that copies every operation payload.
-func (i *ImmutableOps) SafeIterOps() iter.Seq2[string, skiplist.Op] {
-	if i == nil || i.ops == nil {
-		return emptyOpsIter
+// ClearFrozen drops the frozen operation layer after a successful merge.
+func (b *Buffer) ClearFrozen() {
+	b.freezeMu.Lock()
+	defer b.freezeMu.Unlock()
+
+	b.frozen.Store(nil)
+}
+
+func emptyOpsIter(yield func([]byte, ops.Op) bool) {
+}
+
+func (b *Buffer) activeList() *skiplist.SkipList {
+	active := b.active.Load()
+	if active != nil {
+		return active
 	}
-
-	return i.ops.SafeIter()
-}
-
-func emptyOpsIter(yield func(string, skiplist.Op) bool) {
+	created := skiplist.NewSkipList(b.seed)
+	if b.active.CompareAndSwap(nil, created) {
+		return created
+	}
+	return b.active.Load()
 }

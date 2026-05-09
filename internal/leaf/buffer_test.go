@@ -5,19 +5,19 @@ import (
 	"fmt"
 	"testing"
 
-	"fusedb/internal/skiplist"
+	"fusedb/internal/ops"
 )
 
 func TestBufferPutReadOp(t *testing.T) {
 	buffer := NewBuffer(42)
 
-	buffer.Put("alpha", []byte("1"))
+	buffer.Put([]byte("alpha"), []byte("1"))
 
-	op, ok := buffer.ReadOp("alpha")
+	op, ok := buffer.ReadOp([]byte("alpha"))
 	if !ok {
 		t.Fatal("read alpha: not found")
 	}
-	if op.Kind != skiplist.OpPut || !bytes.Equal(op.Data, []byte("1")) {
+	if op.Kind != ops.OpPut || !bytes.Equal(op.Data, []byte("1")) {
 		t.Fatalf("read alpha = %#v, want put(1)", op)
 	}
 	if buffer.Len() != 1 {
@@ -31,14 +31,14 @@ func TestBufferPutReadOp(t *testing.T) {
 func TestBufferDeleteTombstone(t *testing.T) {
 	buffer := NewBuffer(42)
 
-	buffer.Put("alpha", []byte("1"))
-	buffer.Delete("alpha")
+	buffer.Put([]byte("alpha"), []byte("1"))
+	buffer.Delete([]byte("alpha"))
 
-	op, ok := buffer.ReadOp("alpha")
+	op, ok := buffer.ReadOp([]byte("alpha"))
 	if !ok {
 		t.Fatal("read alpha: not found")
 	}
-	if op.Kind != skiplist.OpDelete {
+	if op.Kind != ops.OpDelete {
 		t.Fatalf("read alpha kind = %d, want delete", op.Kind)
 	}
 	if buffer.Len() != 1 {
@@ -52,17 +52,17 @@ func TestBufferDeleteTombstone(t *testing.T) {
 func TestBufferIncCoalesces(t *testing.T) {
 	buffer := NewBuffer(42)
 
-	buffer.Inc("counter", 2)
-	buffer.Inc("counter", 3)
+	buffer.Inc([]byte("counter"), 2)
+	buffer.Inc([]byte("counter"), 3)
 
-	op, ok := buffer.ReadOp("counter")
+	op, ok := buffer.ReadOp([]byte("counter"))
 	if !ok {
 		t.Fatal("read counter: not found")
 	}
-	if op.Kind != skiplist.OpInc {
+	if op.Kind != ops.OpInc {
 		t.Fatalf("read counter kind = %d, want inc", op.Kind)
 	}
-	if delta := skiplist.DecodeInc(op); delta != 5 {
+	if delta := ops.DecodeInc(op); delta != 5 {
 		t.Fatalf("counter delta = %d, want 5", delta)
 	}
 }
@@ -71,7 +71,7 @@ func TestBufferEstimatedBytesTracksUniformWrites(t *testing.T) {
 	buffer := NewBuffer(42)
 
 	for i := 0; i < 100; i++ {
-		buffer.Put(fmt.Sprintf("key:%03d", i), []byte("value"))
+		buffer.Put([]byte(fmt.Sprintf("key:%03d", i)), []byte("value"))
 	}
 
 	got := buffer.EstimatedBytes()
@@ -90,7 +90,7 @@ func TestBufferDataBytesScenarios(t *testing.T) {
 			name: "uniform values",
 			fill: func(buffer *Buffer) {
 				for i := 0; i < 256; i++ {
-					buffer.Put(fmt.Sprintf("key:%03d", i), []byte("value"))
+					buffer.Put([]byte(fmt.Sprintf("key:%03d", i)), []byte("value"))
 				}
 			},
 		},
@@ -99,7 +99,7 @@ func TestBufferDataBytesScenarios(t *testing.T) {
 			fill: func(buffer *Buffer) {
 				for i := 0; i < 256; i++ {
 					value := bytes.Repeat([]byte{'x'}, 1+i%32)
-					buffer.Put(fmt.Sprintf("key:%03d", i), value)
+					buffer.Put([]byte(fmt.Sprintf("key:%03d", i)), value)
 				}
 			},
 		},
@@ -108,9 +108,9 @@ func TestBufferDataBytesScenarios(t *testing.T) {
 			fill: func(buffer *Buffer) {
 				for i := 0; i < 256; i++ {
 					key := fmt.Sprintf("key:%03d", i)
-					buffer.Put(key, []byte("value"))
+					buffer.Put([]byte(key), []byte("value"))
 					if i%2 == 0 {
-						buffer.Delete(key)
+						buffer.Delete([]byte(key))
 					}
 				}
 			},
@@ -119,7 +119,7 @@ func TestBufferDataBytesScenarios(t *testing.T) {
 			name: "hot key updates",
 			fill: func(buffer *Buffer) {
 				for i := 0; i < 256; i++ {
-					buffer.Put("hot", bytes.Repeat([]byte{'x'}, 1+i%64))
+					buffer.Put([]byte("hot"), bytes.Repeat([]byte{'x'}, 1+i%64))
 				}
 			},
 		},
@@ -127,7 +127,7 @@ func TestBufferDataBytesScenarios(t *testing.T) {
 			name: "counter increments",
 			fill: func(buffer *Buffer) {
 				for i := 0; i < 256; i++ {
-					buffer.Inc(fmt.Sprintf("counter:%03d", i%64), 1)
+					buffer.Inc([]byte(fmt.Sprintf("counter:%03d", i%64)), 1)
 				}
 			},
 		},
@@ -151,16 +151,16 @@ func TestBufferDataBytesScenarios(t *testing.T) {
 func TestBufferDataBytesTracksMutations(t *testing.T) {
 	buffer := NewBuffer(42)
 
-	buffer.Put("alpha", bytes.Repeat([]byte{'x'}, 100))
+	buffer.Put([]byte("alpha"), bytes.Repeat([]byte{'x'}, 100))
 	afterPut := buffer.EstimatedBytes()
 
-	buffer.Put("alpha", bytes.Repeat([]byte{'y'}, 100))
+	buffer.Put([]byte("alpha"), bytes.Repeat([]byte{'y'}, 100))
 	afterUpdate := buffer.EstimatedBytes()
 
-	buffer.Put("alpha", bytes.Repeat([]byte{'z'}, 40))
+	buffer.Put([]byte("alpha"), bytes.Repeat([]byte{'z'}, 40))
 	afterShortUpdate := buffer.EstimatedBytes()
 
-	buffer.Delete("alpha")
+	buffer.Delete([]byte("alpha"))
 	afterDelete := buffer.EstimatedBytes()
 
 	if afterPut != 100 {
@@ -187,7 +187,7 @@ func TestBufferDataBytesLargeScenarios(t *testing.T) {
 			fill: func(buffer *Buffer) {
 				value := bytes.Repeat([]byte{'x'}, 1024)
 				for i := 0; i < 2048; i++ {
-					buffer.Put(fmt.Sprintf("key:%06d", i), value)
+					buffer.Put([]byte(fmt.Sprintf("key:%06d", i)), value)
 				}
 			},
 		},
@@ -196,7 +196,7 @@ func TestBufferDataBytesLargeScenarios(t *testing.T) {
 			fill: func(buffer *Buffer) {
 				for i := 0; i < 2048; i++ {
 					value := bytes.Repeat([]byte{'x'}, 768+i%1024)
-					buffer.Put(fmt.Sprintf("key:%06d", i), value)
+					buffer.Put([]byte(fmt.Sprintf("key:%06d", i)), value)
 				}
 			},
 		},
@@ -207,12 +207,12 @@ func TestBufferDataBytesLargeScenarios(t *testing.T) {
 				updated := bytes.Repeat([]byte{'y'}, 1032)
 				for i := 0; i < 4096; i++ {
 					key := fmt.Sprintf("key:%06d", i)
-					buffer.Put(key, value)
+					buffer.Put([]byte(key), value)
 					if i%4 == 0 {
-						buffer.Put(key, updated)
+						buffer.Put([]byte(key), updated)
 					}
 					if i%5 == 0 {
-						buffer.Delete(key)
+						buffer.Delete([]byte(key))
 					}
 				}
 			},
@@ -240,15 +240,15 @@ func TestBufferDataBytesLargeScenarios(t *testing.T) {
 func TestBufferSafeReadOwnsData(t *testing.T) {
 	buffer := NewBuffer(42)
 
-	buffer.Put("alpha", []byte("stable"))
+	buffer.Put([]byte("alpha"), []byte("stable"))
 
-	op, ok := buffer.SafeReadOp("alpha")
+	op, ok := buffer.SafeReadOp([]byte("alpha"))
 	if !ok {
 		t.Fatal("safe read alpha: not found")
 	}
 	op.Data[0] = 'X'
 
-	again, ok := buffer.SafeReadOp("alpha")
+	again, ok := buffer.SafeReadOp([]byte("alpha"))
 	if !ok {
 		t.Fatal("safe read alpha again: not found")
 	}
@@ -260,13 +260,13 @@ func TestBufferSafeReadOwnsData(t *testing.T) {
 func TestBufferIterOpsOrdered(t *testing.T) {
 	buffer := NewBuffer(42)
 
-	buffer.Put("beta", []byte("2"))
-	buffer.Put("alpha", []byte("1"))
-	buffer.Delete("gamma")
+	buffer.Put([]byte("beta"), []byte("2"))
+	buffer.Put([]byte("alpha"), []byte("1"))
+	buffer.Delete([]byte("gamma"))
 
 	var keys []string
 	for key := range buffer.IterOps() {
-		keys = append(keys, key)
+		keys = append(keys, string(key))
 	}
 
 	want := []string{"alpha", "beta", "gamma"}
@@ -280,32 +280,34 @@ func TestBufferIterOpsOrdered(t *testing.T) {
 	}
 }
 
-func TestBufferFreezeOpsDetachesActiveWrites(t *testing.T) {
+func TestBufferFreezeDetachesActiveWrites(t *testing.T) {
 	buffer := NewBuffer(42)
 
-	buffer.Put("alpha", []byte("1"))
-	buffer.Put("beta", []byte("2"))
+	buffer.Put([]byte("alpha"), []byte("1"))
+	buffer.Put([]byte("beta"), []byte("2"))
 
-	immutable := buffer.FreezeOps()
-	if immutable.Len() != 2 {
-		t.Fatalf("immutable len = %d, want 2", immutable.Len())
+	if !buffer.Freeze() {
+		t.Fatal("freeze returned false")
+	}
+	if buffer.FrozenLen() != 2 {
+		t.Fatalf("frozen len = %d, want 2", buffer.FrozenLen())
 	}
 	if buffer.Len() != 0 {
 		t.Fatalf("active len after freeze = %d, want 0", buffer.Len())
 	}
 
-	buffer.Put("alpha", []byte("new"))
-	buffer.Put("gamma", []byte("3"))
+	buffer.Put([]byte("alpha"), []byte("new"))
+	buffer.Put([]byte("gamma"), []byte("3"))
 
-	oldAlpha, ok := immutable.ReadOp("alpha")
+	oldAlpha, ok := buffer.ReadFrozen([]byte("alpha"))
 	if !ok {
-		t.Fatal("immutable read alpha: not found")
+		t.Fatal("frozen read alpha: not found")
 	}
 	if string(oldAlpha.Data) != "1" {
-		t.Fatalf("immutable alpha = %q, want old value 1", oldAlpha.Data)
+		t.Fatalf("frozen alpha = %q, want old value 1", oldAlpha.Data)
 	}
 
-	newAlpha, ok := buffer.ReadOp("alpha")
+	newAlpha, ok := buffer.ReadOp([]byte("alpha"))
 	if !ok {
 		t.Fatal("active read alpha: not found")
 	}
@@ -313,20 +315,77 @@ func TestBufferFreezeOpsDetachesActiveWrites(t *testing.T) {
 		t.Fatalf("active alpha = %q, want new", newAlpha.Data)
 	}
 
-	var immutableKeys []string
-	for key := range immutable.IterOps() {
-		immutableKeys = append(immutableKeys, key)
+	var frozenKeys []string
+	for key := range buffer.IterFrozen() {
+		frozenKeys = append(frozenKeys, string(key))
 	}
-	if got, want := fmt.Sprint(immutableKeys), "[alpha beta]"; got != want {
-		t.Fatalf("immutable keys = %s, want %s", got, want)
+	if got, want := fmt.Sprint(frozenKeys), "[alpha beta]"; got != want {
+		t.Fatalf("frozen keys = %s, want %s", got, want)
 	}
 
 	var activeKeys []string
 	for key := range buffer.IterOps() {
-		activeKeys = append(activeKeys, key)
+		activeKeys = append(activeKeys, string(key))
 	}
 	if got, want := fmt.Sprint(activeKeys), "[alpha gamma]"; got != want {
 		t.Fatalf("active keys = %s, want %s", got, want)
+	}
+}
+
+func TestBufferReadFallsBackToFrozen(t *testing.T) {
+	buffer := NewBuffer(42)
+
+	buffer.Put([]byte("old-only"), []byte("1"))
+	buffer.Put([]byte("shadowed"), []byte("old"))
+	if !buffer.Freeze() {
+		t.Fatal("freeze returned false")
+	}
+
+	buffer.Put([]byte("shadowed"), []byte("new"))
+
+	oldOnly, ok := buffer.ReadOp([]byte("old-only"))
+	if !ok {
+		t.Fatal("read old-only: not found")
+	}
+	if string(oldOnly.Data) != "1" {
+		t.Fatalf("old-only = %q, want 1", oldOnly.Data)
+	}
+
+	shadowed, ok := buffer.ReadOp([]byte("shadowed"))
+	if !ok {
+		t.Fatal("read shadowed: not found")
+	}
+	if string(shadowed.Data) != "new" {
+		t.Fatalf("shadowed = %q, want active value new", shadowed.Data)
+	}
+
+	if buffer.FrozenLen() != 2 {
+		t.Fatalf("frozen len = %d, want 2", buffer.FrozenLen())
+	}
+
+	buffer.ClearFrozen()
+	if _, ok := buffer.ReadOp([]byte("old-only")); ok {
+		t.Fatal("old-only should not be visible after clearing frozen ops")
+	}
+}
+
+func TestBufferFreezeRejectsExistingFrozen(t *testing.T) {
+	buffer := NewBuffer(42)
+
+	buffer.Put([]byte("alpha"), []byte("1"))
+	if !buffer.Freeze() {
+		t.Fatal("first freeze returned false")
+	}
+
+	buffer.Put([]byte("beta"), []byte("2"))
+	if buffer.Freeze() {
+		t.Fatal("second freeze should fail while frozen layer exists")
+	}
+	if buffer.Len() != 1 {
+		t.Fatalf("active len after rejected freeze = %d, want 1", buffer.Len())
+	}
+	if buffer.FrozenLen() != 1 {
+		t.Fatalf("frozen len after rejected freeze = %d, want 1", buffer.FrozenLen())
 	}
 }
 
