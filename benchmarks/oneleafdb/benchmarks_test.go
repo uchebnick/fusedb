@@ -22,7 +22,8 @@ const (
 	benchSeedKeys    = 64 * 1024
 	benchValueSize   = 128
 	benchThreshold   = 5 << 20
-	benchPebbleCache = 64 << 20
+	benchCacheBytes  = 5 << 20
+	benchPebbleCache = benchCacheBytes
 )
 
 const (
@@ -60,6 +61,7 @@ func TestOneLeafPebbleWriteLatency10MB(t *testing.T) {
 	oneLeaf, err := onedb.OpenDB(onedb.DBOptions{
 		Dir:            t.TempDir(),
 		ThresholdBytes: latencyProbeBuffer,
+		CacheBytes:     benchCacheBytes,
 	})
 	if err != nil {
 		t.Fatalf("open oneleaf: %v", err)
@@ -171,6 +173,7 @@ func TestOneLeafPebbleRateLimiterLatency10MB(t *testing.T) {
 	oneLeaf, err := onedb.OpenDB(onedb.DBOptions{
 		Dir:            t.TempDir(),
 		ThresholdBytes: latencyProbeBuffer,
+		CacheBytes:     benchCacheBytes,
 	})
 	if err != nil {
 		t.Fatalf("open oneleaf: %v", err)
@@ -224,6 +227,7 @@ func BenchmarkOneLeafPutAutoMerge5MB(b *testing.B) {
 	db, err := onedb.OpenDB(onedb.DBOptions{
 		Dir:            b.TempDir(),
 		ThresholdBytes: benchThreshold,
+		CacheBytes:     benchCacheBytes,
 	})
 	if err != nil {
 		b.Fatalf("open oneleaf: %v", err)
@@ -404,6 +408,7 @@ func BenchmarkOneLeafOpenGet64K(b *testing.B) {
 		opened, err := onedb.OpenDB(onedb.DBOptions{
 			Dir:            b.TempDir(),
 			ThresholdBytes: benchThreshold,
+			CacheBytes:     benchCacheBytes,
 		})
 		if err != nil {
 			b.Fatalf("open oneleaf: %v", err)
@@ -532,6 +537,7 @@ func newOneLeafDBForBench(b *testing.B, compressed, walEnabled bool) *onedb.DB {
 		ThresholdBytes: benchThreshold,
 		Dictionary:     dict,
 		WALPath:        walPath,
+		CacheBytes:     benchCacheBytes,
 	})
 	if err != nil {
 		b.Fatalf("open oneleaf: %v", err)
@@ -723,6 +729,7 @@ func openOneLeafLatencyProbe(t testing.TB, compressed, walEnabled bool) *onedb.D
 		ThresholdBytes: latencyProbeBuffer,
 		Dictionary:     dict,
 		WALPath:        walPath,
+		CacheBytes:     benchCacheBytes,
 	})
 	if err != nil {
 		t.Fatalf("open oneleaf: %v", err)

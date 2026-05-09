@@ -1,52 +1,108 @@
 # OneLeaf Benchmarks
 
-Environment:
+Fresh run after block-view lookup, OneLeaf value cache, and async WAL changes.
 
-- Date: 2026-05-09
-- Machine: Apple M4, darwin/arm64
-- Package: `fusedb/benchmarks/oneleafdb`
-- Commands:
-  - `go test ./benchmarks/oneleafdb -run '^$' -bench . -benchmem -benchtime=2s -count=3`
-  - `FUSEDB_LATENCY_PROBE=1 go test ./benchmarks/oneleafdb -run 'TestOneLeafPebble(WriteLatency10MB|ReadLatency64K|RateLimiterLatency10MB)' -count=1 -v`
+## Environment
+
+| Field | Value |
+|---|---|
+| Date | `2026-05-10` |
+| Machine | `Apple M4` |
+| OS/Arch | `darwin/arm64` |
+| Package | `fusedb/benchmarks/oneleafdb` |
+| Value size | `128 B` |
+| Seeded read keys | `64K` |
+| OneLeaf cache | `5 MB` value cache |
+| Pebble cache | `5 MB` block cache |
+| Auto-merge threshold | `5 MB` throughput benches, `10 MB` latency probes |
+| WAL mode | async group commit, `200µs` interval |
+
+## Commands
+
+```bash
+GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
+  -run '^$' -bench . -benchmem -benchtime=2s -count=3
+```
+
+```bash
+GOCACHE=$PWD/.gocache FUSEDB_LATENCY_PROBE=1 go test ./benchmarks/oneleafdb \
+  -run 'TestOneLeafPebble(WriteLatency10MB|ReadLatency64K|RateLimiterLatency10MB)' \
+  -count=1 -v
+```
 
 ## Throughput
 
-| Benchmark | ns/op | B/op | allocs/op |
-|---|---:|---:|---:|
-| OneLeaf Put raw | `979.9-1266` | `1553-1846` | `12-13` |
-| OneLeaf Put compressed | `1316-1434` | `1676-1735` | `11-12` |
-| OneLeaf Put compressed + WAL | `4898-5031` | `3596-3697` | `16` |
-| OneLeaf Get 64K raw | `2489-2595` | `9885` | `56` |
-| OneLeaf Get 64K compressed | `5186-5304` | `10125` | `57` |
-| OneLeaf Mixed Put/Get raw | `2623-2682` | `7131-7229` | `37-38` |
-| OneLeaf Mixed Put/Get compressed | `5707-5802` | `7082-7090` | `37` |
-| OneLeaf Open+Get 64K | `254029-267210` | `522227-522238` | `5359` |
-| Pebble Put NoSync | `862.3-912.7` | `45` | `2` |
-| Pebble Get 64K cached | `800.6-809.8` | `120` | `3` |
-| Pebble Get 64K no block cache | `4181-4367` | `120` | `3` |
-| Pebble Open+Get 64K no block cache | `25575759-25836304` | `366061-370813` | `838-841` |
-| Pebble Mixed Put/Get NoSync | `910.3-927.6` | `80` | `3` |
+### Put
+
+| Engine | Mode | ns/op | B/op | allocs/op |
+|---|---|---:|---:|---:|
+| OneLeaf | raw | `821.5-1037` | `1573-1826` | `12-13` |
+| OneLeaf | compressed | `1199-1234` | `1583-1652` | `11` |
+| OneLeaf | compressed + async WAL | `1049-1066` | `1537-1673` | `10` |
+| Pebble | NoSync | `857.1-872.1` | `45` | `2` |
+
+### Read
+
+| Engine | Mode | ns/op | B/op | allocs/op |
+|---|---|---:|---:|---:|
+| OneLeaf | raw, 64K keys | `1182-1196` | `3291-3296` | `5` |
+| OneLeaf | compressed, 64K keys | `3225-3242` | `3534-3539` | `6` |
+| Pebble | 5 MB block cache, 64K keys | `4021-4117` | `120` | `3` |
+| Pebble | no block cache, 64K keys | `4023-4068` | `120` | `3` |
+
+### Mixed Put/Get
+
+| Engine | Mode | ns/op | B/op | allocs/op |
+|---|---|---:|---:|---:|
+| OneLeaf | raw | `1465-1541` | `4115-4237` | `12` |
+| OneLeaf | compressed | `5341-5372` | `4540-4592` | `12` |
+| Pebble | NoSync | `2844-2897` | `80` | `3` |
+
+### Open + Get
+
+| Engine | Mode | ns/op | B/op | allocs/op |
+|---|---|---:|---:|---:|
+| OneLeaf | open reader + get, 64K keys | `244360-255390` | `517320-517383` | `5312` |
+| Pebble | open DB + get, no block cache | `26847385-26967667` | `370085-376218` | `839-842` |
 
 ## Latency
 
-| Workload | avg | p50 | p95 | p99 | max |
-|---|---:|---:|---:|---:|---:|
-| OneLeaf Put raw | `462ns` | `333ns` | `834ns` | `2.25µs` | `996.625µs` |
-| OneLeaf Put compressed | `347ns` | `291ns` | `542ns` | `1.542µs` | `491.916µs` |
-| OneLeaf Put compressed + WAL | `4.096µs` | `3.833µs` | `5.584µs` | `8.375µs` | `4.032209ms` |
-| Pebble Put NoSync | `841ns` | `417ns` | `500ns` | `1.334µs` | `17.763708ms` |
-| OneLeaf Read 64K raw | `2.486µs` | `1.916µs` | `3.333µs` | `20.125µs` | `282.125µs` |
-| OneLeaf Read 64K compressed | `4.926µs` | `4.584µs` | `5.708µs` | `8.375µs` | `886.333µs` |
-| Pebble Read 64K cached | `808ns` | `750ns` | `875ns` | `1.959µs` | `240.791µs` |
-| Pebble Read 64K no block cache | `4.176µs` | `4.125µs` | `4.417µs` | `5.208µs` | `250.833µs` |
-| OneLeaf Rate limiter raw | `392ns` | `209ns` | `541ns` | `1.208µs` | `4.929166ms` |
-| OneLeaf Rate limiter compressed | `246ns` | `209ns` | `375ns` | `542ns` | `22.125µs` |
-| OneLeaf Rate limiter compressed + WAL | `4.015µs` | `3.792µs` | `5.208µs` | `8.667µs` | `644.375µs` |
-| Pebble Rate limiter | `1.117µs` | `792ns` | `1µs` | `1.791µs` | `8.8235ms` |
+Columns are always ordered as `p50`, `p95`, `p99`, `avg`, `max`.
+
+### Write
+
+| Engine | Mode | p50 | p95 | p99 | avg | max |
+|---|---|---:|---:|---:|---:|---:|
+| OneLeaf | raw | `333ns` | `791ns` | `2.042µs` | `429ns` | `769.333µs` |
+| OneLeaf | compressed | `292ns` | `542ns` | `1.291µs` | `346ns` | `124.542µs` |
+| OneLeaf | compressed + async WAL | `292ns` | `500ns` | `1.042µs` | `378ns` | `3.803625ms` |
+| Pebble | NoSync | `417ns` | `500ns` | `1.292µs` | `764ns` | `12.446542ms` |
+
+### Read
+
+| Engine | Mode | p50 | p95 | p99 | avg | max |
+|---|---|---:|---:|---:|---:|---:|
+| OneLeaf | raw, 64K keys | `1.333µs` | `1.958µs` | `4.166µs` | `1.318µs` | `237.25µs` |
+| OneLeaf | compressed, 64K keys | `3.959µs` | `5.125µs` | `7.583µs` | `3.507µs` | `166.292µs` |
+| Pebble | 5 MB block cache, 64K keys | `4.084µs` | `4.417µs` | `5.167µs` | `4.13µs` | `136.833µs` |
+| Pebble | no block cache, 64K keys | `4.083µs` | `4.375µs` | `5.166µs` | `4.125µs` | `90.792µs` |
+
+### Rate Limiter
+
+Workload: `95% Inc`, `5% config update`.
+
+| Engine | Mode | p50 | p95 | p99 | avg | max |
+|---|---|---:|---:|---:|---:|---:|
+| OneLeaf | raw | `250ns` | `417ns` | `542ns` | `263ns` | `116.917µs` |
+| OneLeaf | compressed | `250ns` | `458ns` | `542ns` | `272ns` | `7.959µs` |
+| OneLeaf | compressed + async WAL | `250ns` | `417ns` | `625ns` | `278ns` | `59.25µs` |
+| Pebble | NoSync | `792ns` | `1µs` | `1.209µs` | `997ns` | `8.147583ms` |
 
 ## Notes
 
-- OneLeaf compressed write latency stays close to raw because compression happens in background merge work.
-- OneLeaf compressed read is slower because read path decompresses and decodes a whole block per point lookup.
-- WAL is simple cmd-only append WAL. No recovery, checksum, or fsync policy yet.
-- RocksDB benchmark file exists behind `-tags rocksdb`, but was not run here because `github.com/linxGnu/grocksdb` is not installed in `go.mod`.
+- OneLeaf and Pebble both use a `5 MB` cache budget in this run.
+- OneLeaf read is now much faster than previous runs because point reads use the OneLeaf value cache plus encoded block lookup.
+- Pebble `5 MB` block cache is not enough to materially improve this 64K-key read set; cached and no-cache rows are close.
+- Async WAL returns after appending to the in-memory WAL buffer. Durability happens on group commit or close.
+- Pebble rows use `NoSync`; they are a low-latency baseline, not durable-per-write.
+- RocksDB benchmarks are behind `-tags rocksdb` and were not included in this run.
