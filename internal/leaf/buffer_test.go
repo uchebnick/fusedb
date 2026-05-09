@@ -369,6 +369,27 @@ func TestBufferReadFallsBackToFrozen(t *testing.T) {
 	}
 }
 
+func TestBufferReadMergesActiveAndFrozenInc(t *testing.T) {
+	buffer := NewBuffer(42)
+
+	buffer.Inc([]byte("counter"), 10)
+	if !buffer.Freeze() {
+		t.Fatal("freeze returned false")
+	}
+	buffer.Inc([]byte("counter"), 5)
+
+	op, ok := buffer.ReadOp([]byte("counter"))
+	if !ok {
+		t.Fatal("read counter: not found")
+	}
+	if op.Kind != ops.OpInc {
+		t.Fatalf("counter kind = %d, want inc", op.Kind)
+	}
+	if got := ops.DecodeInc(op); got != 15 {
+		t.Fatalf("counter delta = %d, want 15", got)
+	}
+}
+
 func TestBufferFreezeRejectsExistingFrozen(t *testing.T) {
 	buffer := NewBuffer(42)
 

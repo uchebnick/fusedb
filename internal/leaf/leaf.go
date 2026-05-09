@@ -1,7 +1,6 @@
 package leaf
 
 import (
-	"bytes"
 	"iter"
 	"sync"
 	"sync/atomic"
@@ -93,19 +92,61 @@ func (l *Leaf) Get(key []byte) ([]byte, bool, error) {
 	}
 
 	if op, ok := l.buffer.ReadOp(key); ok {
-		return l.resolveRead(nil, op)
+		if op.Kind != ops.OpInc {
+			encoded, ok, err := l.resolveOp(nil, op)
+			if err != nil || !ok {
+				return nil, ok, err
+			}
+			return decodeUserValue(encoded)
+		}
+
+		segmentValue, segmentOK, err := l.readSegmentValue(key)
+		if err != nil {
+			return nil, false, err
+		}
+		encoded, ok, err := l.resolveOp(optionalValue(segmentValue, segmentOK), op)
+		if err != nil || !ok {
+			return nil, ok, err
+		}
+		return decodeUserValue(encoded)
 	}
+
+	segmentValue, ok, err := l.readSegmentValue(key)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	return decodeUserValue(segmentValue)
+}
+
+func (l *Leaf) readSegmentValue(key []byte) ([]byte, bool, error) {
 	reader := l.reader.Load()
 	if reader == nil {
 		return nil, false, nil
 	}
+	return reader.Get(key)
+}
 
-	segmentValue, ok, err := reader.Get(key)
-	if err != nil || !ok {
-		return nil, ok, err
+func optionalValue(value []byte, ok bool) []byte {
+	if !ok {
+		return nil
 	}
-	raw, err := value.DecodeBytes(segmentValue)
-	return raw, err == nil, err
+	return value
+}
+
+func decodeUserValue(encoded []byte) ([]byte, bool, error) {
+	kind, err := value.KindOf(encoded)
+	if err != nil {
+		return nil, false, err
+	}
+	switch kind {
+	case value.KindBytes:
+		raw, err := value.DecodeBytes(encoded)
+		return raw, err == nil, err
+	case value.KindInt64:
+		return encoded, true, nil
+	default:
+		return nil, false, value.ErrUnknownKind
+	}
 }
 
 // Put buffers a byte value replacement for key.
@@ -221,16 +262,12 @@ func closeRetiredReader(retired retiredReader) {
 	}
 }
 
-func (l *Leaf) resolveRead(segmentValue []byte, op ops.Op) ([]byte, bool, error) {
+func (l *Leaf) resolveOp(segmentValue []byte, op ops.Op) ([]byte, bool, error) {
 	switch op.Kind {
 	case ops.OpDelete:
 		return nil, false, nil
 	case ops.OpPut:
-		raw, err := value.DecodeBytes(op.Data)
-		if err != nil {
-			return nil, false, err
-		}
-		return raw, true, nil
+		return op.Data, true, nil
 	case ops.OpInc:
 		base := int64(0)
 		if len(segmentValue) > 0 {
@@ -242,7 +279,7 @@ func (l *Leaf) resolveRead(segmentValue []byte, op ops.Op) ([]byte, bool, error)
 		}
 		return value.EncodeInt64(base + ops.DecodeInc(op)), true, nil
 	default:
-		return bytes.Clone(segmentValue), len(segmentValue) > 0, nil
+		return segmentValue, len(segmentValue) > 0, nil
 	}
 }
 

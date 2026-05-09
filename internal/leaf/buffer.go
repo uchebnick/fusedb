@@ -83,24 +83,24 @@ func (b *Buffer) Inc(key []byte, delta int64) {
 // The returned Op is a zero-copy view of immutable buffer-owned data. Callers
 // must not mutate returned Op.Data. Use SafeReadOp when an owned copy is needed.
 func (b *Buffer) ReadOp(key []byte) (ops.Op, bool) {
-	if op, ok := b.activeList().Read(key); ok {
-		return op, true
-	}
+	active, hasActive := b.activeList().Read(key)
 	if frozen := b.frozen.Load(); frozen != nil {
-		return frozen.Read(key)
+		frozenOp, hasFrozen := frozen.Read(key)
+		return mergeLayeredOps(frozenOp, hasFrozen, active, hasActive)
+	}
+	if hasActive {
+		return active, true
 	}
 	return ops.Op{}, false
 }
 
 // SafeReadOp returns the buffered operation for key with an owned Op.Data copy.
 func (b *Buffer) SafeReadOp(key []byte) (ops.Op, bool) {
-	if op, ok := b.activeList().SafeRead(key); ok {
-		return op, true
+	op, ok := b.ReadOp(key)
+	if !ok {
+		return ops.Op{}, false
 	}
-	if frozen := b.frozen.Load(); frozen != nil {
-		return frozen.SafeRead(key)
-	}
-	return ops.Op{}, false
+	return op.Clone(), true
 }
 
 // IterOps returns a zero-copy ordered iterator over buffered operations.
@@ -168,6 +168,25 @@ func (b *Buffer) ClearFrozen() {
 }
 
 func emptyOpsIter(yield func([]byte, ops.Op) bool) {
+}
+
+func mergeLayeredOps(lower ops.Op, hasLower bool, upper ops.Op, hasUpper bool) (ops.Op, bool) {
+	if !hasUpper {
+		return lower, hasLower
+	}
+	if !hasLower {
+		return upper, true
+	}
+	if upper.Kind != ops.OpInc {
+		return upper, true
+	}
+	if lower.Kind != ops.OpInc {
+		return upper, true
+	}
+
+	merged := lower.Clone()
+	ops.MergeIncInto(&merged, upper)
+	return merged, true
 }
 
 func (b *Buffer) activeList() *skiplist.SkipList {
