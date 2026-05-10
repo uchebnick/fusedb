@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"fusedb/internal/compression"
 	onedb "fusedb/internal/oneleafdb"
 
 	"github.com/cockroachdb/pebble"
@@ -92,9 +93,14 @@ func TestGoYCSBCoreLatency(t *testing.T) {
 		},
 	}
 
+	compressedDict := newProbeDictionary(t)
+	compressedDictRaw := compressedDict.Raw()
+	defer compressedDict.Close()
 	engines := []ycsbEngineSpec{
-		{name: "OneLeaf", open: openYCSBOneLeaf(false)},
-		{name: "OneLeaf async WAL", open: openYCSBOneLeaf(true)},
+		{name: "OneLeaf raw", open: openYCSBOneLeaf(false, false, nil)},
+		{name: "OneLeaf compressed", open: openYCSBOneLeaf(true, false, compressedDictRaw)},
+		{name: "OneLeaf raw + async WAL", open: openYCSBOneLeaf(false, true, nil)},
+		{name: "OneLeaf compressed + async WAL", open: openYCSBOneLeaf(true, true, compressedDictRaw)},
 		{name: "Pebble NoSync", open: openYCSBPebble},
 	}
 
@@ -201,7 +207,7 @@ func defaultYCSBProportion(value string) string {
 	return value
 }
 
-func openYCSBOneLeaf(walEnabled bool) func(*testing.T, *ycsbLatencyRecorder) (ycsb.DB, func()) {
+func openYCSBOneLeaf(compressed bool, walEnabled bool, dictRaw []byte) func(*testing.T, *ycsbLatencyRecorder) (ycsb.DB, func()) {
 	return func(t *testing.T, recorder *ycsbLatencyRecorder) (ycsb.DB, func()) {
 		t.Helper()
 
@@ -210,6 +216,13 @@ func openYCSBOneLeaf(walEnabled bool) func(*testing.T, *ycsbLatencyRecorder) (yc
 			Dir:            dir,
 			ThresholdBytes: latencyProbeBuffer,
 			CacheBytes:     benchCacheBytes,
+		}
+		if compressed {
+			dict, err := compression.NewDictionaryLevel(1, dictRaw, compression.DefaultLZ4Acceleration)
+			if err != nil {
+				t.Fatalf("create ycsb dictionary: %v", err)
+			}
+			opts.Dictionary = dict
 		}
 		if walEnabled {
 			opts.WALPath = dir + "/oneleaf.wal"

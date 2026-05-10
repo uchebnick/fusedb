@@ -552,7 +552,7 @@ func newBenchDictionary(b *testing.B) *compression.Dictionary {
 		"../../internal/compression/kv_dict_samples_50k.jsonl",
 		1,
 		compression.DefaultDictionarySize,
-		compression.DefaultZstdLevel,
+		compression.DefaultLZ4Acceleration,
 		50_000,
 	)
 	if err != nil {
@@ -778,7 +778,7 @@ func newProbeDictionary(t testing.TB) *compression.Dictionary {
 		"../../internal/compression/kv_dict_samples_50k.jsonl",
 		1,
 		compression.DefaultDictionarySize,
-		compression.DefaultZstdLevel,
+		compression.DefaultLZ4Acceleration,
 		50_000,
 	)
 	if err != nil {
