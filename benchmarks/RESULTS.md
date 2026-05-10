@@ -1,6 +1,6 @@
 # OneLeaf Benchmarks
 
-Fresh run after block-view lookup, OneLeaf value cache, and async WAL changes.
+Fresh run after switching segment compression to `LZ4Dict4KB`.
 
 ## Environment
 
@@ -15,13 +15,14 @@ Fresh run after block-view lookup, OneLeaf value cache, and async WAL changes.
 | OneLeaf cache | `5 MB` value cache |
 | Pebble cache | `5 MB` block cache |
 | Auto-merge threshold | `5 MB` throughput benches, `10 MB` latency probes |
-| WAL mode | async group commit, `200µs` interval |
+| Compression | `LZ4Dict4KB`, trained from `internal/compression/kv_dict_samples_50k.jsonl` |
+| WAL mode | async group commit, `200us` interval |
 
 ## Commands
 
 ```bash
 GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
-  -run '^$' -bench . -benchmem -benchtime=2s -count=3
+  -run '^$' -bench 'Benchmark(OneLeaf|Pebble)' -benchmem -benchtime=2s -count=3
 ```
 
 ```bash
@@ -35,62 +36,73 @@ GOCACHE=$PWD/.gocache FUSEDB_REAL_YCSB=1 go test ./benchmarks/oneleafdb \
   -run TestGoYCSBCoreLatency -count=1 -v
 ```
 
+```bash
+GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
+  -run TestCompression4KProbeRatio -count=1 -v
+```
+
+```bash
+GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
+  -run '^$' -bench 'BenchmarkCompression4K(Compress|Decompress)' \
+  -benchmem -benchtime=2s -count=5
+```
+
 ## Throughput
 
 ### Put
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `821.5-1037` | `1573-1826` | `12-13` |
-| OneLeaf | compressed | `1199-1234` | `1583-1652` | `11` |
-| OneLeaf | compressed + async WAL | `1049-1066` | `1537-1673` | `10` |
-| Pebble | NoSync | `857.1-872.1` | `45` | `2` |
+| OneLeaf | raw | `804.6-1009` | `1453-1748` | `12` |
+| OneLeaf | LZ4Dict4KB | `826.7-973.4` | `1828-2228` | `12-13` |
+| OneLeaf | LZ4Dict4KB + async WAL | `821.9-1063` | `1929-2106` | `11` |
+| Pebble | NoSync | `862.1-868.6` | `45` | `2` |
 
 ### Read
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw, 64K keys | `1182-1196` | `3291-3296` | `5` |
-| OneLeaf | compressed, 64K keys | `3225-3242` | `3534-3539` | `6` |
-| Pebble | 5 MB block cache, 64K keys | `4021-4117` | `120` | `3` |
-| Pebble | no block cache, 64K keys | `4023-4068` | `120` | `3` |
+| OneLeaf | raw, 64K keys | `1222-1230` | `3289-3296` | `5` |
+| OneLeaf | LZ4Dict4KB, 64K keys | `1279-1291` | `3504-3510` | `5` |
+| Pebble | 5 MB block cache, 64K keys | `4026-4061` | `120` | `3` |
+| Pebble | no block cache, 64K keys | `4043-4085` | `120` | `3` |
 
 ### Mixed Put/Get
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `1465-1541` | `4115-4237` | `12` |
-| OneLeaf | compressed | `5341-5372` | `4540-4592` | `12` |
-| Pebble | NoSync | `2844-2897` | `80` | `3` |
+| OneLeaf | raw | `1436-1586` | `4043-4190` | `12` |
+| OneLeaf | LZ4Dict4KB | `2614-2753` | `5547-5890` | `14-15` |
+| Pebble | NoSync | `2825-2872` | `80` | `3` |
 
 ### Open + Get
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | open reader + get, 64K keys | `244360-255390` | `517320-517383` | `5312` |
-| Pebble | open DB + get, no block cache | `26847385-26967667` | `370085-376218` | `839-842` |
+| OneLeaf | open reader + get, 64K keys | `233669-254753` | `517323-517343` | `5312` |
+| Pebble | open DB + get, no block cache | `25612791-26863712` | `368247-374979` | `838-843` |
 
 ## Latency
 
-Columns are always ordered as `p50`, `p95`, `p99`, `avg`, `max`.
+Columns always ordered as `p50`, `p95`, `p99`, `avg`, `max`.
 
 ### Write
 
 | Engine | Mode | p50 | p95 | p99 | avg | max |
 |---|---|---:|---:|---:|---:|---:|
-| OneLeaf | raw | `333ns` | `791ns` | `2.042µs` | `429ns` | `769.333µs` |
-| OneLeaf | compressed | `292ns` | `542ns` | `1.291µs` | `346ns` | `124.542µs` |
-| OneLeaf | compressed + async WAL | `292ns` | `500ns` | `1.042µs` | `378ns` | `3.803625ms` |
-| Pebble | NoSync | `417ns` | `500ns` | `1.292µs` | `764ns` | `12.446542ms` |
+| OneLeaf | raw | `333ns` | `792ns` | `2.041us` | `441ns` | `309.042us` |
+| OneLeaf | LZ4Dict4KB | `292ns` | `666ns` | `1.417us` | `376ns` | `944.375us` |
+| OneLeaf | LZ4Dict4KB + async WAL | `292ns` | `500ns` | `1.167us` | `375ns` | `3.165584ms` |
+| Pebble | NoSync | `417ns` | `583ns` | `1.417us` | `788ns` | `11.796792ms` |
 
 ### Read
 
 | Engine | Mode | p50 | p95 | p99 | avg | max |
 |---|---|---:|---:|---:|---:|---:|
-| OneLeaf | raw, 64K keys | `1.333µs` | `1.958µs` | `4.166µs` | `1.318µs` | `237.25µs` |
-| OneLeaf | compressed, 64K keys | `3.959µs` | `5.125µs` | `7.583µs` | `3.507µs` | `166.292µs` |
-| Pebble | 5 MB block cache, 64K keys | `4.084µs` | `4.417µs` | `5.167µs` | `4.13µs` | `136.833µs` |
-| Pebble | no block cache, 64K keys | `4.083µs` | `4.375µs` | `5.166µs` | `4.125µs` | `90.792µs` |
+| OneLeaf | raw, 64K keys | `1.334us` | `1.958us` | `3.625us` | `1.31us` | `132.542us` |
+| OneLeaf | LZ4Dict4KB, 64K keys | `1.417us` | `2us` | `4.125us` | `1.368us` | `173.041us` |
+| Pebble | 5 MB block cache, 64K keys | `4.084us` | `4.459us` | `5.084us` | `4.132us` | `146.584us` |
+| Pebble | no block cache, 64K keys | `4.083us` | `4.458us` | `5.167us` | `4.146us` | `198us` |
 
 ### Rate Limiter
 
@@ -98,17 +110,18 @@ Workload: `95% Inc`, `5% config update`.
 
 | Engine | Mode | p50 | p95 | p99 | avg | max |
 |---|---|---:|---:|---:|---:|---:|
-| OneLeaf | raw | `250ns` | `417ns` | `542ns` | `263ns` | `116.917µs` |
-| OneLeaf | compressed | `250ns` | `458ns` | `542ns` | `272ns` | `7.959µs` |
-| OneLeaf | compressed + async WAL | `250ns` | `417ns` | `625ns` | `278ns` | `59.25µs` |
-| Pebble | NoSync | `792ns` | `1µs` | `1.209µs` | `997ns` | `8.147583ms` |
+| OneLeaf | raw | `250ns` | `417ns` | `583ns` | `268ns` | `142.166us` |
+| OneLeaf | LZ4Dict4KB | `250ns` | `458ns` | `542ns` | `271ns` | `16.917us` |
+| OneLeaf | LZ4Dict4KB + async WAL | `250ns` | `417ns` | `583ns` | `278ns` | `55.25us` |
+| Pebble | NoSync | `792ns` | `1us` | `1.25us` | `1.02us` | `8.673958ms` |
 
 ## Real go-ycsb Core Latency
 
 These rows use `github.com/pingcap/go-ycsb v1.0.3` Core workload generation,
 not a hand-written ratio probe. The adapters store one YCSB field per KV record,
-use the same `5 MB` cache budget, and report measured DB adapter calls with
-columns ordered as `p50`, `p95`, `p99`, `avg`, `max`.
+use the same `5 MB` cache budget, and report measured DB adapter calls.
+
+Columns: `p50`, `p95`, `p99`, `avg`, `max`.
 
 ### Load
 
@@ -116,9 +129,11 @@ Workload: `100% insert`.
 
 | Engine | p50 | p95 | p99 | avg | max |
 |---|---:|---:|---:|---:|---:|
-| OneLeaf | `458ns` | `1µs` | `2.625µs` | `575ns` | `203.125µs` |
-| OneLeaf async WAL | `375ns` | `1.084µs` | `2.375µs` | `692ns` | `3.872459ms` |
-| Pebble NoSync | `417ns` | `583ns` | `1.417µs` | `1.149µs` | `10.165541ms` |
+| OneLeaf raw | `375ns` | `792ns` | `1.917us` | `450ns` | `55.167us` |
+| OneLeaf LZ4Dict4KB | `375ns` | `709ns` | `1.583us` | `478ns` | `568.708us` |
+| OneLeaf raw + async WAL | `375ns` | `1.125us` | `2.25us` | `742ns` | `4.0935ms` |
+| OneLeaf LZ4Dict4KB + async WAL | `375ns` | `1.083us` | `2.125us` | `622ns` | `3.346584ms` |
+| Pebble NoSync | `417ns` | `625ns` | `1.5us` | `1.031us` | `8.021417ms` |
 
 ### Workload A
 
@@ -126,9 +141,11 @@ Workload: `50% read`, `50% update`.
 
 | Engine | p50 | p95 | p99 | avg | max |
 |---|---:|---:|---:|---:|---:|
-| OneLeaf | `875ns` | `1.833µs` | `2.583µs` | `1.002µs` | `58.459µs` |
-| OneLeaf async WAL | `875ns` | `1.917µs` | `2.5µs` | `1.117µs` | `1.744209ms` |
-| Pebble NoSync | `709ns` | `6.041µs` | `9.125µs` | `2.319µs` | `9.242208ms` |
+| OneLeaf raw | `1.041us` | `2.125us` | `3.459us` | `1.191us` | `90.416us` |
+| OneLeaf LZ4Dict4KB | `1.042us` | `2.166us` | `3.416us` | `1.216us` | `228.459us` |
+| OneLeaf raw + async WAL | `958ns` | `2.125us` | `3.042us` | `1.201us` | `1.863916ms` |
+| OneLeaf LZ4Dict4KB + async WAL | `959ns` | `2.208us` | `3.459us` | `1.31us` | `2.607792ms` |
+| Pebble NoSync | `750ns` | `6.417us` | `9.417us` | `2.412us` | `9.018167ms` |
 
 ### Workload B
 
@@ -136,9 +153,11 @@ Workload: `95% read`, `5% update`.
 
 | Engine | p50 | p95 | p99 | avg | max |
 |---|---:|---:|---:|---:|---:|
-| OneLeaf | `833ns` | `1.458µs` | `2.166µs` | `922ns` | `164.417µs` |
-| OneLeaf async WAL | `834ns` | `1.792µs` | `2.625µs` | `1.077µs` | `3.230209ms` |
-| Pebble NoSync | `4µs` | `4.792µs` | `5.458µs` | `2.801µs` | `160.75µs` |
+| OneLeaf raw | `916ns` | `1.625us` | `2.709us` | `1.012us` | `83.417us` |
+| OneLeaf LZ4Dict4KB | `875ns` | `1.5us` | `2.292us` | `963ns` | `120.834us` |
+| OneLeaf raw + async WAL | `916ns` | `1.834us` | `2.833us` | `1.056us` | `1.200833ms` |
+| OneLeaf LZ4Dict4KB + async WAL | `875ns` | `1.833us` | `2.667us` | `1.125us` | `4.28425ms` |
+| Pebble NoSync | `4.125us` | `4.791us` | `5.25us` | `2.788us` | `178.792us` |
 
 ### Workload C
 
@@ -146,9 +165,11 @@ Workload: `100% read`.
 
 | Engine | p50 | p95 | p99 | avg | max |
 |---|---:|---:|---:|---:|---:|
-| OneLeaf | `584ns` | `1.208µs` | `2µs` | `614ns` | `222.5µs` |
-| OneLeaf async WAL | `625ns` | `1.291µs` | `1.792µs` | `630ns` | `70.75µs` |
-| Pebble NoSync | `3.875µs` | `4.5µs` | `5.042µs` | `2.839µs` | `112.458µs` |
+| OneLeaf raw | `625ns` | `1.209us` | `1.583us` | `640ns` | `295.75us` |
+| OneLeaf LZ4Dict4KB | `666ns` | `1.25us` | `1.75us` | `653ns` | `110.542us` |
+| OneLeaf raw + async WAL | `708ns` | `1.5us` | `2.167us` | `751ns` | `795.167us` |
+| OneLeaf LZ4Dict4KB + async WAL | `708ns` | `1.5us` | `2.417us` | `743ns` | `240.125us` |
+| Pebble NoSync | `4.125us` | `4.75us` | `5.583us` | `3.023us` | `155.5us` |
 
 ### Workload F
 
@@ -156,15 +177,61 @@ Workload: read-modify-write.
 
 | Engine | p50 | p95 | p99 | avg | max |
 |---|---:|---:|---:|---:|---:|
-| OneLeaf | `666ns` | `1.459µs` | `2.125µs` | `756ns` | `284.541µs` |
-| OneLeaf async WAL | `625ns` | `1.459µs` | `2.334µs` | `923ns` | `7.777667ms` |
-| Pebble NoSync | `625ns` | `8.375µs` | `9.458µs` | `2.318µs` | `10.8895ms` |
+| OneLeaf raw | `666ns` | `1.5us` | `2.125us` | `765ns` | `249.917us` |
+| OneLeaf LZ4Dict4KB | `666ns` | `1.5us` | `2.333us` | `768ns` | `800.167us` |
+| OneLeaf raw + async WAL | `667ns` | `1.542us` | `2.667us` | `884ns` | `3.700542ms` |
+| OneLeaf LZ4Dict4KB + async WAL | `625ns` | `1.5us` | `2.334us` | `812ns` | `1.766667ms` |
+| Pebble NoSync | `625ns` | `8.75us` | `9.709us` | `2.439us` | `10.500666ms` |
+
+## 4KB Compression Probe
+
+Input corpus: `3577` blocks, avg raw block `3940 B`.
+
+### Ratio
+
+| Codec | Avg compressed | Ratio | Saved |
+|---|---:|---:|---:|
+| LZ4Dict4KB | `1474 B` | `0.374` | `62.6%` |
+| LZ4Dict8KB | `1450 B` | `0.368` | `63.2%` |
+| LZ4Dict16KB | `1425 B` | `0.362` | `63.8%` |
+| SnappyNoDict | `1650 B` | `0.419` | `58.1%` |
+| S2Dict4KB | `1477 B` | `0.375` | `62.5%` |
+| S2Dict8KB | `1435 B` | `0.364` | `63.6%` |
+| S2Dict16KB | `1394 B` | `0.354` | `64.6%` |
+
+### Compression Speed
+
+Average of 5 passes.
+
+| Codec | ns/op avg | ns/op range | MB/s avg | B/op | allocs/op |
+|---|---:|---:|---:|---:|---:|
+| LZ4Dict4KB | `6984` | `6930-7037` | `564.2` | `0` | `0` |
+| LZ4Dict8KB | `7557.2` | `7510-7623` | `521.3` | `0` | `0` |
+| LZ4Dict16KB | `7434` | `7410-7449` | `530` | `0` | `0` |
+| SnappyNoDict | `3032.2` | `3009-3048` | `1299.5` | `0` | `0` |
+| S2Dict4KB | `5056` | `5034-5096` | `779.3` | `0` | `0` |
+| S2Dict8KB | `5565.6` | `5532-5586` | `707.9` | `0` | `0` |
+| S2Dict16KB | `5590.6` | `5563-5611` | `704.8` | `0` | `0` |
+
+### Decompression Speed
+
+Average of 5 passes.
+
+| Codec | ns/op avg | ns/op range | MB/s avg | B/op | allocs/op |
+|---|---:|---:|---:|---:|---:|
+| LZ4Dict4KB | `974.5` | `968.1-977.4` | `4043.3` | `0` | `0` |
+| LZ4Dict8KB | `1112.4` | `1105-1123` | `3542.2` | `0` | `0` |
+| LZ4Dict16KB | `1254.2` | `1249-1262` | `3141.2` | `0` | `0` |
+| SnappyNoDict | `1205.6` | `1203-1211` | `3268.2` | `0` | `0` |
+| S2Dict4KB | `1673.8` | `1663-1689` | `2353.8` | `0` | `0` |
+| S2Dict8KB | `1756.4` | `1752-1764` | `2243` | `0` | `0` |
+| S2Dict16KB | `1838.8` | `1830-1850` | `2143` | `0` | `0` |
 
 ## Notes
 
-- OneLeaf and Pebble both use a `5 MB` cache budget in this run.
-- OneLeaf read is now much faster than previous runs because point reads use the OneLeaf value cache plus encoded block lookup.
-- Pebble `5 MB` block cache is not enough to materially improve this 64K-key read set; cached and no-cache rows are close.
+- OneLeaf and Pebble both use a `5 MB` cache budget.
+- `compressed` means `LZ4Dict4KB` trained from `internal/compression/kv_dict_samples_50k.jsonl`.
+- LZ4Dict4KB adds ~`0.5us` to p99 read latency in this run, much lower than previous zstd-dict runs.
 - Async WAL returns after appending to the in-memory WAL buffer. Durability happens on group commit or close.
 - Pebble rows use `NoSync`; they are a low-latency baseline, not durable-per-write.
 - go-ycsb workload E is not included because OneLeaf does not expose DB-level scan/range reads yet.

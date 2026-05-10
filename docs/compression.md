@@ -139,7 +139,7 @@ Use when:
 
 ### 5.3 Whole-Block Compression Without Dictionary
 
-Build a raw block, then compress the entire block using a standard codec such as zstd without a custom dictionary.
+Build a raw block, then compress the entire block using a standard codec such as LZ4, zstd, Snappy, or S2 without a custom dictionary.
 
 Pros:
 
@@ -549,6 +549,66 @@ This approach should therefore be introduced only after the simpler designs are 
 
 ---
 
+### 5.7 Codec Candidates For Dictionary Compression
+
+Dictionary strategy and compression codec are separate choices.
+
+The current implementation uses `LZ4Dict4KB`: LZ4 block compression with a
+trained 4 KB raw dictionary. The segment
+format should keep enough metadata to support other codecs later:
+
+- codec kind
+- codec version
+- dictionary id/version
+- uncompressed block length
+- compressed block length
+
+Candidate codecs:
+
+- **Zstd dictionary compression**
+  - strong ratio candidate
+  - good ratio on structured KV data
+  - fast decompression
+  - dictionary training and versioning are well-supported
+
+- **LZ4 block compression with external dictionary**
+  - current implementation path: `LZ4Dict4KB`
+  - much faster decompression than zstd in many cases
+  - usually weaker compression ratio
+  - interesting for latency-sensitive hot paths
+  - good fit while point-read p99 matters more than maximum ratio
+
+- **S2 dictionary compression**
+  - very fast compression path
+  - competitive ratio on the current JSONL sample corpus
+  - slower decompression than local LZ4 measurements
+  - useful candidate if merge CPU becomes more important than read p99
+
+- **Brotli with custom dictionary**
+  - can produce strong ratios on text-like data
+  - usually slower than zstd/lz4
+  - more attractive for cold archival segments than hot point reads
+
+- **Snappy**
+  - very fast and simple
+  - standard Snappy does not have the same trained-dictionary model
+  - useful as a no-dictionary baseline, less useful for adaptive dictionaries
+
+- **Custom value-aware codecs**
+  - encode known value kinds before generic compression
+  - examples: varint counters, packed booleans, small enums, repeated JSON keys
+  - can be combined with zstd/lz4 after value normalization
+  - highest engineering cost, but likely best long-term ratio for typed data
+
+Recommended near-term path:
+
+1. Keep `LZ4Dict4KB` as the production baseline.
+2. Add a codec enum to compression metadata before adding more codecs.
+3. Benchmark `none`, `lz4-dict`, `s2-dict`, `snappy`, and `zstd-dict` on the same block corpus.
+4. Only add Brotli/custom codecs after the read-path allocation and cache story is stable.
+
+---
+
 ## 6. Rejected Or Discouraged Strategies
 
 ### 6.1 Dictionary Per Block
@@ -684,7 +744,7 @@ For FuseDB near term:
 - keep block and index logic in `segment`
 - start with either:
   - no compression
-  - one global zstd dictionary
+  - one global `LZ4Dict4KB` dictionary
 
 If the global dictionary later proves too coarse:
 
