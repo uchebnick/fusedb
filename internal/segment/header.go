@@ -14,7 +14,7 @@ type CompressionKind uint32
 
 const (
 	CompressionNone CompressionKind = iota
-	CompressionZstdDict
+	CompressionLZ4Dict
 )
 
 var (
@@ -45,7 +45,7 @@ func (h Header) Validate() error {
 		if h.DictionaryID != 0 {
 			return ErrUnexpectedDictionaryID
 		}
-	case CompressionZstdDict:
+	case CompressionLZ4Dict:
 		if h.DictionaryID == 0 {
 			return ErrMissingDictionaryID
 		}

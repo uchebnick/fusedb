@@ -77,7 +77,7 @@ func NewSegment(opts Options) (*Segment, error) {
 		if opts.CompressionDictionary != nil {
 			return nil, ErrUnexpectedDictionary
 		}
-	case CompressionZstdDict:
+	case CompressionLZ4Dict:
 		if opts.CompressionDictionary == nil {
 			return nil, ErrMissingDictionary
 		}
@@ -106,7 +106,7 @@ func NewSegment(opts Options) (*Segment, error) {
 		Version:     opts.Version,
 		Compression: opts.Compression,
 	}
-	if opts.Compression == CompressionZstdDict {
+	if opts.Compression == CompressionLZ4Dict {
 		header.DictionaryID = opts.CompressionDictionary.ID()
 	}
 	headerBytes, err := header.MarshalBinary()
@@ -342,7 +342,7 @@ func (s *Segment) flushBlock() error {
 	if err != nil {
 		return fmt.Errorf("segment: encode block %d: %w", s.Index.Len(), err)
 	}
-	if s.compression == CompressionZstdDict {
+	if s.compression == CompressionLZ4Dict {
 		payload, err = s.dictionary.Compress(payload)
 		if err != nil {
 			return fmt.Errorf("segment: compress block %d: %w", s.Index.Len(), err)

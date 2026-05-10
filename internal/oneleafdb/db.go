@@ -84,7 +84,7 @@ func OpenDB(opts DBOptions) (*DB, error) {
 	compressionKind := segment.CompressionNone
 	var registry *compression.Registry
 	if opts.Dictionary != nil {
-		compressionKind = segment.CompressionZstdDict
+		compressionKind = segment.CompressionLZ4Dict
 		registry = compression.NewRegistry()
 		if err := registry.Add(opts.Dictionary); err != nil {
 			return nil, fmt.Errorf("oneleafdb: add dictionary: %w", err)

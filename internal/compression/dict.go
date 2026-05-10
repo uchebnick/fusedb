@@ -1,21 +1,49 @@
 package compression
 
+/*
+#cgo darwin CFLAGS: -I/opt/homebrew/include
+#cgo darwin LDFLAGS: -L/opt/homebrew/lib -llz4
+#cgo linux LDFLAGS: -llz4
+#include <stdlib.h>
+#include <lz4.h>
+
+static int fusedb_lz4_compress_dict(
+	char* src, int srcSize,
+	char* dst, int dstCap,
+	char* dict, int dictSize,
+	int acceleration
+) {
+	LZ4_stream_t* stream = LZ4_createStream();
+	if (stream == NULL) {
+		return 0;
+	}
+	LZ4_loadDict(stream, dict, dictSize);
+	int n = LZ4_compress_fast_continue(stream, src, dst, srcSize, dstCap, acceleration);
+	LZ4_freeStream(stream);
+	return n;
+}
+*/
+import "C"
+
 import (
 	"bytes"
 	"container/list"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
+	"unsafe"
 
 	"fusedb/internal/disk"
 
-	"github.com/klauspost/compress/zstd"
+	dictbuilder "github.com/klauspost/compress/dict"
 )
 
 const (
-	MinDictionarySize     = 8
-	DefaultDictionarySize = 8 << 10
-	DefaultZstdLevel      = 1
+	MinDictionarySize      = 8
+	DefaultDictionarySize  = 4 << 10
+	DefaultLZ4Acceleration = 1
+	lz4BlockHeaderSize     = 4
 )
 
 var (
@@ -23,26 +51,26 @@ var (
 	ErrEmptyDictionary      = errors.New("compression: empty dictionary")
 	ErrZeroDictionaryID     = errors.New("compression: dictionary id must be non-zero")
 	ErrNoSamples            = errors.New("compression: no samples provided")
-	ErrBuildDictionaryPanic = errors.New("compression: zstd dictionary build panic")
+	ErrBuildDictionaryPanic = errors.New("compression: dictionary build panic")
 	ErrDictionaryNotFound   = errors.New("compression: dictionary not found")
 	ErrDuplicateDictionary  = errors.New("compression: duplicate dictionary id")
 	ErrDictionaryClosed     = errors.New("compression: dictionary closed")
+	ErrCorruptBlock         = errors.New("compression: corrupt lz4 block")
 	ErrNilDictionaryFS      = errors.New("compression: nil dictionary filesystem")
 	ErrDictionaryStorage    = errors.New("compression: dictionary registry has no storage")
 	ErrDictionaryIDMismatch = errors.New("compression: dictionary id mismatch")
 )
 
-// Dictionary is immutable runtime wrapper around one zstd dictionary.
+// Dictionary is immutable runtime wrapper around one LZ4 raw dictionary.
 //
 // Same dictionary bytes must be used for both compression and decompression.
 // Dictionary is safe for concurrent block-level Compress/Decompress calls.
 type Dictionary struct {
-	mu      sync.Mutex
-	id      uint32
-	raw     []byte
-	level   int
-	encoder *zstd.Encoder
-	decoder *zstd.Decoder
+	mu           sync.Mutex
+	id           uint32
+	raw          []byte
+	acceleration int
+	closed       bool
 }
 
 // TrainOptions configures dictionary training.
@@ -70,56 +98,31 @@ type registryEntry struct {
 	elem *list.Element
 }
 
-// NewDictionary builds reusable zstd dictionary codec from raw dictionary bytes.
+// NewDictionary builds reusable LZ4 dictionary codec from raw dictionary bytes.
 func NewDictionary(id uint32, raw []byte) (*Dictionary, error) {
-	return NewDictionaryLevel(id, raw, DefaultZstdLevel)
+	return NewDictionaryLevel(id, raw, DefaultLZ4Acceleration)
 }
 
-// NewDictionaryLevel builds reusable zstd dictionary codec with explicit level.
-func NewDictionaryLevel(id uint32, raw []byte, level int) (*Dictionary, error) {
+// NewDictionaryLevel builds reusable LZ4 dictionary codec with explicit acceleration.
+func NewDictionaryLevel(id uint32, raw []byte, acceleration int) (*Dictionary, error) {
 	if id == 0 {
 		return nil, ErrZeroDictionaryID
 	}
 	if len(raw) == 0 {
 		return nil, ErrEmptyDictionary
 	}
-	if level == 0 {
-		level = DefaultZstdLevel
-	}
-
-	levelOpt := zstd.EncoderLevelFromZstd(level)
-	dictBytes := bytes.Clone(raw)
-
-	encoder, err := zstd.NewWriter(
-		nil,
-		zstd.WithEncoderConcurrency(1),
-		zstd.WithEncoderLevel(levelOpt),
-		zstd.WithEncoderDict(dictBytes),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("compression: create zstd encoder: %w", err)
-	}
-
-	decoder, err := zstd.NewReader(
-		nil,
-		zstd.WithDecoderConcurrency(1),
-		zstd.WithDecoderDicts(dictBytes),
-	)
-	if err != nil {
-		_ = encoder.Close()
-		return nil, fmt.Errorf("compression: create zstd decoder: %w", err)
+	if acceleration == 0 {
+		acceleration = DefaultLZ4Acceleration
 	}
 
 	return &Dictionary{
-		id:      id,
-		raw:     dictBytes,
-		level:   level,
-		encoder: encoder,
-		decoder: decoder,
+		id:           id,
+		raw:          bytes.Clone(raw),
+		acceleration: acceleration,
 	}, nil
 }
 
-// TrainDictionary trains zstd dictionary bytes from representative samples.
+// TrainDictionary trains LZ4 raw dictionary bytes from representative samples.
 func TrainDictionary(opts TrainOptions) (raw []byte, err error) {
 	if opts.ID == 0 {
 		return nil, ErrZeroDictionaryID
@@ -141,11 +144,6 @@ func TrainDictionary(opts TrainOptions) (raw []byte, err error) {
 		return nil, fmt.Errorf("compression: dictionary history %d < %d", len(history), MinDictionarySize)
 	}
 
-	level := zstd.EncoderLevelFromZstd(opts.Level)
-	if opts.Level == 0 {
-		level = zstd.EncoderLevelFromZstd(DefaultZstdLevel)
-	}
-
 	defer func() {
 		if r := recover(); r != nil {
 			raw = nil
@@ -153,16 +151,12 @@ func TrainDictionary(opts TrainOptions) (raw []byte, err error) {
 		}
 	}()
 
-	raw, err = zstd.BuildDict(zstd.BuildDictOptions{
-		ID:         opts.ID,
-		Contents:   samples,
-		History:    history,
-		Offsets:    [3]int{1, 4, 8},
-		CompatV155: opts.CompatV155,
-		Level:      level,
+	raw, err = dictbuilder.BuildRawDict(samples, dictbuilder.Options{
+		MaxDictSize: opts.Size,
+		HashBytes:   6,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("compression: build zstd dictionary: %w", err)
+		return nil, fmt.Errorf("compression: build lz4 dictionary: %w", err)
 	}
 	return raw, nil
 }
@@ -180,7 +174,7 @@ func (d *Dictionary) Level() int {
 	if d == nil {
 		return 0
 	}
-	return d.level
+	return d.acceleration
 }
 
 // Raw returns detached raw dictionary bytes.
@@ -203,10 +197,41 @@ func (d *Dictionary) CompressInto(dst, src []byte) ([]byte, error) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.encoder == nil {
+	if d.closed {
 		return nil, ErrDictionaryClosed
 	}
-	return d.encoder.EncodeAll(src, dst[:0]), nil
+	if len(src) == 0 {
+		if cap(dst) < lz4BlockHeaderSize {
+			dst = make([]byte, lz4BlockHeaderSize)
+		} else {
+			dst = dst[:lz4BlockHeaderSize]
+		}
+		binary.LittleEndian.PutUint32(dst[:4], 0)
+		return dst, nil
+	}
+
+	bound := int(C.LZ4_compressBound(C.int(len(src))))
+	need := lz4BlockHeaderSize + bound
+	if cap(dst) < need {
+		dst = make([]byte, need)
+	} else {
+		dst = dst[:need]
+	}
+	binary.LittleEndian.PutUint32(dst[:4], uint32(len(src)))
+
+	n := C.fusedb_lz4_compress_dict(
+		cBytes(src),
+		C.int(len(src)),
+		cBytes(dst[lz4BlockHeaderSize:]),
+		C.int(bound),
+		cBytes(d.raw),
+		C.int(len(d.raw)),
+		C.int(d.acceleration),
+	)
+	if n <= 0 {
+		return nil, fmt.Errorf("compression: encode lz4 block failed")
+	}
+	return dst[:lz4BlockHeaderSize+int(n)], nil
 }
 
 // Decompress decodes one independent block with dictionary.
@@ -221,14 +246,33 @@ func (d *Dictionary) DecompressInto(dst, src []byte) ([]byte, error) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.decoder == nil {
+	if d.closed {
 		return nil, ErrDictionaryClosed
 	}
-	out, err := d.decoder.DecodeAll(src, dst[:0])
-	if err != nil {
-		return nil, fmt.Errorf("compression: decode zstd block: %w", err)
+	if len(src) < lz4BlockHeaderSize {
+		return nil, ErrCorruptBlock
 	}
-	return out, nil
+	rawLen := int(binary.LittleEndian.Uint32(src[:4]))
+	if rawLen == 0 {
+		return dst[:0], nil
+	}
+	if cap(dst) < rawLen {
+		dst = make([]byte, rawLen)
+	} else {
+		dst = dst[:rawLen]
+	}
+	n := C.LZ4_decompress_safe_usingDict(
+		cBytes(src[lz4BlockHeaderSize:]),
+		cBytes(dst),
+		C.int(len(src)-lz4BlockHeaderSize),
+		C.int(rawLen),
+		cBytes(d.raw),
+		C.int(len(d.raw)),
+	)
+	if n != C.int(rawLen) {
+		return nil, fmt.Errorf("%w: decoded %d, want %d", ErrCorruptBlock, int(n), rawLen)
+	}
+	return dst, nil
 }
 
 // Close releases held codec resources.
@@ -239,23 +283,15 @@ func (d *Dictionary) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	var errs []error
-	if d.encoder != nil {
-		if err := d.encoder.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if d.decoder != nil {
-		d.decoder.Close()
-	}
+	d.closed = true
+	return nil
+}
 
-	d.encoder = nil
-	d.decoder = nil
-
-	if len(errs) == 0 {
+func cBytes(b []byte) *C.char {
+	if len(b) == 0 {
 		return nil
 	}
-	return errors.Join(errs...)
+	return (*C.char)(unsafe.Pointer(&b[0]))
 }
 
 // NewRegistry creates empty dictionary registry.

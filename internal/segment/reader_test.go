@@ -148,7 +148,7 @@ func TestOpenReaderCompressed(t *testing.T) {
 		ExpectedKeys:          4,
 		TargetBlockSize:       96,
 		BloomFalsePositive:    0.01,
-		Compression:           CompressionZstdDict,
+		Compression:           CompressionLZ4Dict,
 		CompressionDictionary: dict,
 	})
 	if err != nil {
@@ -208,7 +208,7 @@ func TestReaderIteratorCompressed(t *testing.T) {
 		ExpectedKeys:          4,
 		TargetBlockSize:       96,
 		BloomFalsePositive:    0.01,
-		Compression:           CompressionZstdDict,
+		Compression:           CompressionLZ4Dict,
 		CompressionDictionary: dict,
 	})
 	if err != nil {
@@ -272,7 +272,7 @@ func TestOpenReaderCompressedLoadsDictionaryFromPersistentRegistry(t *testing.T)
 		ExpectedKeys:          2,
 		TargetBlockSize:       96,
 		BloomFalsePositive:    0.01,
-		Compression:           CompressionZstdDict,
+		Compression:           CompressionLZ4Dict,
 		CompressionDictionary: dict,
 	})
 	if err != nil {
@@ -324,7 +324,7 @@ func TestReaderCompressedRequiresRegistry(t *testing.T) {
 		SegmentID:             303,
 		Version:               3,
 		ExpectedKeys:          2,
-		Compression:           CompressionZstdDict,
+		Compression:           CompressionLZ4Dict,
 		CompressionDictionary: dict,
 	})
 	if err != nil {

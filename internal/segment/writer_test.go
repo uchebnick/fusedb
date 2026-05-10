@@ -144,7 +144,7 @@ func TestSegmentFreezeCompressed(t *testing.T) {
 		Version:               8,
 		TargetBlockSize:       96,
 		BloomFalsePositive:    0.01,
-		Compression:           CompressionZstdDict,
+		Compression:           CompressionLZ4Dict,
 		CompressionDictionary: dict,
 	})
 	if err != nil {
@@ -165,8 +165,8 @@ func TestSegmentFreezeCompressed(t *testing.T) {
 		t.Fatalf("freeze compressed segment: %v", err)
 	}
 
-	if segment.Header.Compression != CompressionZstdDict {
-		t.Fatalf("compression = %d, want zstd dict", segment.Header.Compression)
+	if segment.Header.Compression != CompressionLZ4Dict {
+		t.Fatalf("compression = %d, want lz4 dict", segment.Header.Compression)
 	}
 	if segment.Header.Version != 8 {
 		t.Fatalf("version = %d, want 8", segment.Header.Version)

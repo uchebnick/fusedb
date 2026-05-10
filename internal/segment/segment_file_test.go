@@ -123,7 +123,7 @@ func TestOpenSegmentCompressed(t *testing.T) {
 		Version:               9,
 		TargetBlockSize:       96,
 		BloomFalsePositive:    0.01,
-		Compression:           CompressionZstdDict,
+		Compression:           CompressionLZ4Dict,
 		CompressionDictionary: dict,
 	})
 	if err != nil {

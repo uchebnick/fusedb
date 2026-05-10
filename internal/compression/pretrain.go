@@ -9,7 +9,7 @@ type PretrainOptions struct {
 	CompatV155 bool
 }
 
-// PretrainDictionary trains and opens a reusable zstd dictionary.
+// PretrainDictionary trains and opens a reusable LZ4 dictionary.
 //
 // Callers should pass samples that match the real compression unit. For segment
 // compression this means encoded raw block bytes, not standalone values.

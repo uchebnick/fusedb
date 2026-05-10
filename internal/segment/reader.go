@@ -34,7 +34,7 @@ func NewReader(segment *Segment, registry *compression.Registry) (*Reader, error
 	reader := &Reader{
 		segment: segment,
 	}
-	if segment.Header.Compression == CompressionZstdDict {
+	if segment.Header.Compression == CompressionLZ4Dict {
 		if registry == nil {
 			return nil, ErrMissingDictionaryRegistry
 		}
@@ -125,7 +125,7 @@ func (r *Reader) readBlock(entry BlockIndexEntry) (Block, error) {
 	if err != nil {
 		return Block{}, err
 	}
-	if r.segment.Header.Compression == CompressionZstdDict {
+	if r.segment.Header.Compression == CompressionLZ4Dict {
 		payload, err = r.dictionary.Decompress(payload)
 		if err != nil {
 			return Block{}, fmt.Errorf("segment: decompress block: %w", err)
@@ -143,7 +143,7 @@ func (r *Reader) readBlockValue(entry BlockIndexEntry, key []byte) ([]byte, bool
 	if err != nil {
 		return nil, false, err
 	}
-	if r.segment.Header.Compression == CompressionZstdDict {
+	if r.segment.Header.Compression == CompressionLZ4Dict {
 		payload, err = r.dictionary.Decompress(payload)
 		if err != nil {
 			return nil, false, fmt.Errorf("segment: decompress block: %w", err)

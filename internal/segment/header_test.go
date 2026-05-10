@@ -5,7 +5,7 @@ import "testing"
 func TestHeaderRoundTrip(t *testing.T) {
 	header := Header{
 		Version:      42,
-		Compression:  CompressionZstdDict,
+		Compression:  CompressionLZ4Dict,
 		DictionaryID: 17,
 	}
 

@@ -116,7 +116,7 @@ func TestCompressedSegmentEndToEndExample(t *testing.T) {
 		ExpectedKeys:          len(entries),
 		TargetBlockSize:       96,
 		BloomFalsePositive:    0.01,
-		Compression:           CompressionZstdDict,
+		Compression:           CompressionLZ4Dict,
 		CompressionDictionary: dict,
 	})
 	if err != nil {

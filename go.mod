@@ -7,6 +7,7 @@ require github.com/klauspost/compress v1.18.5
 require (
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/cockroachdb/pebble v1.1.5
+	github.com/golang/snappy v0.0.4
 	github.com/linxGnu/grocksdb v1.10.8
 	github.com/magiconair/properties v1.8.6
 	github.com/pingcap/go-ycsb v1.0.3
@@ -24,7 +25,6 @@ require (
 	github.com/getsentry/sentry-go v0.27.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
-	github.com/golang/snappy v0.0.4 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
