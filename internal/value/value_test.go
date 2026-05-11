@@ -27,13 +27,14 @@ func TestEncodeDecodeBytes(t *testing.T) {
 		t.Fatalf("decoded = %v", decoded)
 	}
 
+	// DecodeBytes returns borrowed slice - modifying it affects the source
 	decoded[0] = 0xee
 	again, err := DecodeBytes(encoded)
 	if err != nil {
 		t.Fatalf("decode bytes again: %v", err)
 	}
-	if again[0] != 0x02 {
-		t.Fatalf("decode returned shared data: %v", again)
+	if again[0] != 0xee {
+		t.Fatalf("decode should return borrowed data: got %v, want 0xee", again[0])
 	}
 }
 

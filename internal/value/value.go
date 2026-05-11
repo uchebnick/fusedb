@@ -1,7 +1,6 @@
 package value
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -45,7 +44,7 @@ func EncodeBytes(data []byte) []byte {
 	return out
 }
 
-// DecodeBytes returns an owned copy of a tagged bytes value payload.
+// DecodeBytes returns the tagged bytes value payload.
 func DecodeBytes(data []byte) ([]byte, error) {
 	kind, err := KindOf(data)
 	if err != nil {
@@ -54,7 +53,7 @@ func DecodeBytes(data []byte) ([]byte, error) {
 	if kind != KindBytes {
 		return nil, fmt.Errorf("%w: got %d want %d", ErrKindMismatch, kind, KindBytes)
 	}
-	return bytes.Clone(data[1:]), nil
+	return data[1:], nil
 }
 
 // EncodeInt64 wraps an int64 varint payload with a value kind tag.
