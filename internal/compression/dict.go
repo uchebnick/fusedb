@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"fusedb/internal/disk"
@@ -44,7 +45,30 @@ const (
 	DefaultDictionarySize  = 4 << 10
 	DefaultLZ4Acceleration = 1
 	lz4BlockHeaderSize     = 4
+	maxDecompressBlockSize = 5 << 10
 )
+
+var decompressBufPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, maxDecompressBlockSize)
+		return &buf
+	},
+}
+
+// PooledDecompressBuffer wraps a decompressed buffer from the pool with a Release method.
+// Data is a slice referencing part of the pooled buffer.
+type PooledDecompressBuffer struct {
+	Data   []byte
+	bufPtr *[]byte
+}
+
+// Release returns the buffer to the pool.
+func (pb *PooledDecompressBuffer) Release() {
+	if pb != nil && pb.bufPtr != nil {
+		decompressBufPool.Put(pb.bufPtr)
+		pb.bufPtr = nil
+	}
+}
 
 var (
 	ErrNilDictionary        = errors.New("compression: nil dictionary")
@@ -66,11 +90,11 @@ var (
 // Same dictionary bytes must be used for both compression and decompression.
 // Dictionary is safe for concurrent block-level Compress/Decompress calls.
 type Dictionary struct {
-	mu           sync.Mutex
+	mu           sync.Mutex // Only for Compress and Close
 	id           uint32
 	raw          []byte
 	acceleration int
-	closed       bool
+	closed       atomic.Bool
 }
 
 // TrainOptions configures dictionary training.
@@ -182,7 +206,7 @@ func (d *Dictionary) Raw() []byte {
 	if d == nil {
 		return nil
 	}
-	return bytes.Clone(d.raw)
+	return d.raw
 }
 
 // Compress encodes one independent block with dictionary.
@@ -197,7 +221,7 @@ func (d *Dictionary) CompressInto(dst, src []byte) ([]byte, error) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.closed {
+	if d.closed.Load() {
 		return nil, ErrDictionaryClosed
 	}
 	if len(src) == 0 {
@@ -235,8 +259,49 @@ func (d *Dictionary) CompressInto(dst, src []byte) ([]byte, error) {
 }
 
 // Decompress decodes one independent block with dictionary.
-func (d *Dictionary) Decompress(src []byte) ([]byte, error) {
-	return d.DecompressInto(nil, src)
+func (d *Dictionary) Decompress(src []byte) (*PooledDecompressBuffer, error) {
+	if d == nil {
+		return nil, ErrNilDictionary
+	}
+	if d.closed.Load() {
+		return nil, ErrDictionaryClosed
+	}
+	if len(src) < lz4BlockHeaderSize {
+		return nil, ErrCorruptBlock
+	}
+	rawLen := int(binary.LittleEndian.Uint32(src[:4]))
+	if rawLen == 0 {
+		return &PooledDecompressBuffer{Data: []byte{}}, nil
+	}
+
+	poolBufPtr := decompressBufPool.Get().(*[]byte)
+	poolBuf := (*poolBufPtr)[:cap(*poolBufPtr)]
+
+	var decompressBuf []byte
+	if rawLen <= len(poolBuf) {
+		decompressBuf = poolBuf[:rawLen]
+	} else {
+		// Block larger than pool buffer - allocate new buffer
+		decompressBuf = make([]byte, rawLen)
+	}
+
+	n := C.LZ4_decompress_safe_usingDict(
+		cBytes(src[lz4BlockHeaderSize:]),
+		cBytes(decompressBuf),
+		C.int(len(src)-lz4BlockHeaderSize),
+		C.int(rawLen),
+		cBytes(d.raw),
+		C.int(len(d.raw)),
+	)
+	if n != C.int(rawLen) {
+		decompressBufPool.Put(poolBufPtr)
+		return nil, fmt.Errorf("%w: decoded %d, want %d", ErrCorruptBlock, int(n), rawLen)
+	}
+
+	return &PooledDecompressBuffer{
+		Data:   decompressBuf,
+		bufPtr: poolBufPtr,
+	}, nil
 }
 
 // DecompressInto decodes src and appends raw bytes to dst.
@@ -246,7 +311,7 @@ func (d *Dictionary) DecompressInto(dst, src []byte) ([]byte, error) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.closed {
+	if d.closed.Load() {
 		return nil, ErrDictionaryClosed
 	}
 	if len(src) < lz4BlockHeaderSize {
@@ -256,14 +321,25 @@ func (d *Dictionary) DecompressInto(dst, src []byte) ([]byte, error) {
 	if rawLen == 0 {
 		return dst[:0], nil
 	}
-	if cap(dst) < rawLen {
-		dst = make([]byte, rawLen)
+
+	var decompressBuf []byte
+	var poolBufPtr *[]byte
+	if dst == nil || cap(dst) < rawLen {
+		poolBufPtr = decompressBufPool.Get().(*[]byte)
+		defer decompressBufPool.Put(poolBufPtr)
+		poolBuf := (*poolBufPtr)[:cap(*poolBufPtr)]
+		if rawLen <= len(poolBuf) {
+			decompressBuf = poolBuf[:rawLen]
+		} else {
+			decompressBuf = make([]byte, rawLen)
+		}
 	} else {
-		dst = dst[:rawLen]
+		decompressBuf = dst[:rawLen]
 	}
+
 	n := C.LZ4_decompress_safe_usingDict(
 		cBytes(src[lz4BlockHeaderSize:]),
-		cBytes(dst),
+		cBytes(decompressBuf),
 		C.int(len(src)-lz4BlockHeaderSize),
 		C.int(rawLen),
 		cBytes(d.raw),
@@ -272,7 +348,13 @@ func (d *Dictionary) DecompressInto(dst, src []byte) ([]byte, error) {
 	if n != C.int(rawLen) {
 		return nil, fmt.Errorf("%w: decoded %d, want %d", ErrCorruptBlock, int(n), rawLen)
 	}
-	return dst, nil
+
+	if poolBufPtr != nil {
+		result := make([]byte, rawLen)
+		copy(result, decompressBuf)
+		return result, nil
+	}
+	return decompressBuf, nil
 }
 
 // Close releases held codec resources.
@@ -283,7 +365,7 @@ func (d *Dictionary) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.closed = true
+	d.closed.Store(true)
 	return nil
 }
 
@@ -497,7 +579,7 @@ func (r *Registry) Compress(id uint32, src []byte) ([]byte, error) {
 }
 
 // Decompress decodes src with dictionary selected by ID.
-func (r *Registry) Decompress(id uint32, src []byte) ([]byte, error) {
+func (r *Registry) Decompress(id uint32, src []byte) (*PooledDecompressBuffer, error) {
 	dict, err := r.MustGet(id)
 	if err != nil {
 		return nil, err
