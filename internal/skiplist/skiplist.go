@@ -144,7 +144,7 @@ func (s *SkipList) Iter() iter.Seq2[[]byte, ops.Op] {
 				continue
 			}
 
-			if !yield(bytes.Clone(x.key), *op) {
+			if !yield(x.key, *op) {
 				return
 			}
 		}
@@ -164,7 +164,7 @@ func (s *SkipList) SafeIter() iter.Seq2[[]byte, ops.Op] {
 
 func newNode(key []byte, op ops.Op, height int32) *node {
 	n := &node{
-		key:  bytes.Clone(key),
+		key:  key,
 		next: make([]atomic.Pointer[node], height),
 	}
 	n.op.Store(&op)

@@ -76,10 +76,10 @@ func TestDecodeRejectsCorruptData(t *testing.T) {
 	if _, err := KindOf([]byte{99}); !errors.Is(err, ErrUnknownKind) {
 		t.Fatalf("unknown kind err = %v, want %v", err, ErrUnknownKind)
 	}
-	if _, err := DecodeInt64([]byte{byte(KindInt64), 0x80}); !errors.Is(err, ErrInvalidInt64) {
+	if _, err := DecodeInt64([]byte{0x80, byte(KindInt64)}); !errors.Is(err, ErrInvalidInt64) {
 		t.Fatalf("bad int err = %v, want %v", err, ErrInvalidInt64)
 	}
-	if _, err := DecodeInt64([]byte{byte(KindInt64), 0x02, 0x00}); !errors.Is(err, ErrTrailingIntBytes) {
+	if _, err := DecodeInt64([]byte{0x02, 0x00, byte(KindInt64)}); !errors.Is(err, ErrTrailingIntBytes) {
 		t.Fatalf("trailing int err = %v, want %v", err, ErrTrailingIntBytes)
 	}
 }
