@@ -144,7 +144,10 @@ func (db *DB) Get(key []byte) ([]byte, bool, error) {
 		return nil, false, nil
 	}
 	if db.cacheEpoch.Load() == epoch {
-		db.cache.set(key, value, epoch)
+		// Copy value before caching to prevent sharing with leaf's internal data
+		valueCopy := make([]byte, len(value))
+		copy(valueCopy, value)
+		db.cache.set(key, valueCopy, epoch)
 	}
 	return value, true, nil
 }
