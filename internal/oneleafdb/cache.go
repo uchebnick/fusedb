@@ -1,8 +1,8 @@
 package oneleafdb
 
 import (
-	"bytes"
 	"sync"
+	"unsafe"
 )
 
 type valueCache struct {
@@ -34,11 +34,14 @@ func (c *valueCache) get(key []byte, epoch uint64) ([]byte, bool) {
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	entry, ok := c.items[string(key)]
+	entry, ok := c.items[unsafe.String(&key[0], len(key))]
 	if !ok || entry.epoch != epoch {
 		return nil, false
 	}
-	return bytes.Clone(entry.value), true
+	// Return a copy to prevent caller from modifying cached data
+	valueCopy := make([]byte, len(entry.value))
+	copy(valueCopy, entry.value)
+	return valueCopy, true
 }
 
 func (c *valueCache) set(key, value []byte, epoch uint64) {
@@ -65,7 +68,7 @@ func (c *valueCache) set(key, value []byte, epoch uint64) {
 		}
 	}
 	c.items[cacheKey] = cacheEntry{
-		value: bytes.Clone(value),
+		value: value,
 		epoch: epoch,
 		size:  size,
 	}
@@ -78,7 +81,7 @@ func (c *valueCache) delete(key []byte) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cacheKey := string(key)
+	cacheKey := unsafe.String(&key[0], len(key))
 	if old, ok := c.items[cacheKey]; ok {
 		c.used -= old.size
 		delete(c.items, cacheKey)
