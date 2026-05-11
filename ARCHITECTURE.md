@@ -2,6 +2,8 @@
 
 Technical documentation of FuseDB internals for contributors and researchers.
 
+[Русский](./ARCHITECTURE.ru.md)
+
 ## Table of Contents
 
 - [System Overview](#system-overview)
