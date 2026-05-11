@@ -3,6 +3,7 @@ package segment
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"fusedb/internal/compression"
 	"fusedb/internal/disk"
@@ -14,12 +15,14 @@ var (
 	ErrReaderFileNotOpen         = errors.New("segment: reader file is not open")
 )
 
+
 // Reader provides point-lookups over one frozen immutable segment.
 type Reader struct {
 	segment    *Segment
 	file       disk.File
 	dictionary *compression.Dictionary
 	closed     bool
+	blockBufPool sync.Pool
 }
 
 // NewReader binds a frozen segment to a lookup reader and opens its file.
@@ -53,8 +56,11 @@ func NewReader(segment *Segment, registry *compression.Registry) (*Reader, error
 		return nil, err
 	}
 	reader.file = file
+
 	return reader, nil
 }
+
+
 
 // OpenReader loads one segment from file and binds it to a lookup reader.
 func OpenReader(fs disk.FS, path string, registry *compression.Registry) (*Reader, error) {
@@ -121,17 +127,34 @@ func (r *Reader) Close() error {
 }
 
 func (r *Reader) readBlock(entry BlockIndexEntry) (Block, error) {
-	payload, err := r.readBlockPayload(entry)
+	pb, err := r.readBlockPayload(entry)
 	if err != nil {
 		return Block{}, err
 	}
+
 	if r.segment.Header.Compression == CompressionLZ4Dict {
-		payload, err = r.dictionary.Decompress(payload)
+		dpb, err := r.dictionary.Decompress(pb.Data)
+		pb.Release() // Release compressed buffer immediately
 		if err != nil {
 			return Block{}, fmt.Errorf("segment: decompress block: %w", err)
 		}
+		block, err := DecodeBlockUnsafe(dpb.Data)
+		if err != nil {
+			dpb.Release()
+			return Block{}, fmt.Errorf("segment: decode block: %w", err)
+		}
+		// Block holds references to decompressed data - must clone before releasing
+		blockCopy := block.Clone()
+		dpb.Release()
+		return blockCopy, nil
 	}
-	block, err := DecodeBlockUnsafe(payload)
+
+	// No compression - copy since DecodeBlockUnsafe keeps references
+	payloadCopy := make([]byte, len(pb.Data))
+	copy(payloadCopy, pb.Data)
+	pb.Release()
+
+	block, err := DecodeBlockUnsafe(payloadCopy)
 	if err != nil {
 		return Block{}, fmt.Errorf("segment: decode block: %w", err)
 	}
@@ -139,17 +162,43 @@ func (r *Reader) readBlock(entry BlockIndexEntry) (Block, error) {
 }
 
 func (r *Reader) readBlockValue(entry BlockIndexEntry, key []byte) ([]byte, bool, error) {
-	payload, err := r.readBlockPayload(entry)
+	pb, err := r.readBlockPayload(entry)
 	if err != nil {
 		return nil, false, err
 	}
+
 	if r.segment.Header.Compression == CompressionLZ4Dict {
-		payload, err = r.dictionary.Decompress(payload)
+		dpb, err := r.dictionary.Decompress(pb.Data)
+		pb.Release() // Release compressed buffer immediately
 		if err != nil {
 			return nil, false, fmt.Errorf("segment: decompress block: %w", err)
 		}
+		view, err := NewBlockView(dpb.Data)
+		if err != nil {
+			dpb.Release()
+			return nil, false, fmt.Errorf("segment: decode block: %w", err)
+		}
+		value, ok, err := view.Find(key)
+		if err != nil {
+			dpb.Release()
+			return nil, false, fmt.Errorf("segment: find block value: %w", err)
+		}
+		// Value is a slice into decompressed buffer - must copy before releasing
+		var valueCopy []byte
+		if ok && len(value) > 0 {
+			valueCopy = make([]byte, len(value))
+			copy(valueCopy, value)
+		}
+		dpb.Release()
+		return valueCopy, ok, nil
 	}
-	view, err := NewBlockView(payload)
+
+	// No compression - copy since NewBlockView keeps references
+	payloadCopy := make([]byte, len(pb.Data))
+	copy(payloadCopy, pb.Data)
+	pb.Release()
+
+	view, err := NewBlockView(payloadCopy)
 	if err != nil {
 		return nil, false, fmt.Errorf("segment: decode block: %w", err)
 	}
@@ -160,7 +209,7 @@ func (r *Reader) readBlockValue(entry BlockIndexEntry, key []byte) ([]byte, bool
 	return value, ok, nil
 }
 
-func (r *Reader) readBlockPayload(entry BlockIndexEntry) ([]byte, error) {
+func (r *Reader) readBlockPayload(entry BlockIndexEntry) (*PooledBuffer, error) {
 	if r == nil || r.segment == nil || r.closed {
 		return nil, ErrNilSegment
 	}
