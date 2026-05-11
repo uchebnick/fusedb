@@ -190,3 +190,42 @@ Average of 5 benchmark runs.
 - Pebble rows use `NoSync`; they are a low-latency baseline, not durable-per-write.
 - go-ycsb workload E is not included because OneLeaf does not expose DB-level scan/range reads yet.
 - RocksDB benchmarks are behind `-tags rocksdb` and were not included in this run.
+
+## Memory Allocations Analysis
+
+### Get Operation (340 B/op, 5 allocs/op)
+
+Per-operation breakdown:
+- Cache operations (get/set): ~109 B
+- Block decompression: ~87 B
+- Disk read (readFullAt): ~73 B
+- Reader overhead: ~71 B
+
+Main sources:
+1. `cache.get` - copying from cache
+2. `Reader.Get` - block reading
+3. `Decompress` - LZ4 decompression
+4. `readFullAt` - disk I/O
+5. `cache.set` - cache storage
+
+### Put Operation (1849 B/op, 12 allocs/op)
+
+Per-operation breakdown (~154 B per allocation):
+1. WAL buffer management
+2. Data copying (skiplist ownership)
+3. Block serialization
+4. LZ4 compression
+5. Value encoding
+6. Block building
+7. Skiplist node creation
+8. Key formatting
+9-12. Various overhead
+
+Main sources:
+- `wal.swapActive` (21.90%) - WAL buffers
+- `bytes.Clone` (13.87%) - data ownership
+- `Block.MarshalBinary` (12.82%) - serialization
+- `Dictionary.CompressInto` (11.90%) - compression
+- `value.EncodeBytes` (10.33%) - encoding
+- `Block.AddUnsafe` (10.26%) - block building
+- `skiplist.newNode` (4.36%) - index nodes

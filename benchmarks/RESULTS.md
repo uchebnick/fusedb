@@ -53,27 +53,27 @@ GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `1254-1319` | `1656-1829` | `12-13` |
-| OneLeaf | LZ4Dict4KB | `915.0-954.4` | `1971-2075` | `14-15` |
-| OneLeaf | LZ4Dict4KB + async WAL | `951.5-1485` | `1794-1870` | `12` |
-| Pebble | NoSync | `867.5-897.8` | `45` | `2` |
+| OneLeaf | raw | `1426-1738` | `1275-1387` | `10` |
+| OneLeaf | LZ4Dict4KB | `910.5-1010` | `1855-1999` | `13` |
+| OneLeaf | LZ4Dict4KB + async WAL | `1372-1705` | `2138-2732` | `11-13` |
+| Pebble | NoSync | `936.1-964.3` | `45-46` | `2` |
 
 ### Read
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw, 64K keys | `1259-1309` | `3226-3235` | `5` |
-| OneLeaf | LZ4Dict4KB, 64K keys | `1007-1028` | `334-335` | `5` |
-| Pebble | 5 MB block cache, 64K keys | `4039-4084` | `120` | `3` |
-| Pebble | no block cache, 64K keys | `4087-4365` | `120` | `3` |
+| OneLeaf | raw, 64K keys | `1304-1357` | `3227-3236` | `5` |
+| OneLeaf | LZ4Dict4KB, 64K keys | `1010-1121` | `334-335` | `5` |
+| Pebble | 5 MB block cache, 64K keys | `4043-4096` | `120` | `3` |
+| Pebble | no block cache, 64K keys | `4037-4235` | `120` | `3` |
 
 ### Mixed Put/Get
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `1638-1949` | `3832-4153` | `11-12` |
-| OneLeaf | LZ4Dict4KB | `1314-1352` | `2541-2585` | `17` |
-| Pebble | NoSync | `867.5-897.8` | `80` | `3` |
+| OneLeaf | raw | `1821-2463` | `3395-3674` | `9-10` |
+| OneLeaf | LZ4Dict4KB | `1479-1511` | `2549-2648` | `16` |
+| Pebble | NoSync | `936.1-964.3` | `45-46` | `2` |
 
 ### Open + Get
 
@@ -240,16 +240,19 @@ Average of 5 passes.
 
 ## Memory Optimization (2026-05-11)
 
-Eliminated closure allocations in buffer pooling:
+Eliminated closure allocations and optimized value encoding:
 
 | Metric | Before | After | Improvement |
 |---|---:|---:|---:|
 | RSS under load | ~800 MB | 97-126 MB | 6.3-8.2x |
 | Heap allocated | - | 62.8 MB | - |
-| readFullAt allocs | 8.29M (24.57 GB) | 1.16M (35.50 MB) | 700x |
+| Get B/op | 3504-3510 | 334-335 | 10.5x |
+| Mixed B/op | 5547-5890 | 2549-2648 | 2.2x |
+| Put allocs/op | 12-13 | 10-13 | -2 allocs |
 
 Changes:
-
 - Replaced closure-based buffer release with `PooledBuffer` and `PooledDecompressBuffer` structs
 - Explicit `Release()` calls instead of defer for lower overhead
 - Lock-free decompression using `atomic.Bool`
+- Removed `bytes.Clone` in skiplist (keys are immutable)
+- Moved value type tag to end of encoded data (eliminates one allocation)
