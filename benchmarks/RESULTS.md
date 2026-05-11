@@ -6,7 +6,7 @@ Fresh run after switching segment compression to `LZ4Dict4KB`.
 
 | Field | Value |
 |---|---|
-| Date | `2026-05-10` |
+| Date | `2026-05-11` |
 | Machine | `Apple M4` |
 | OS/Arch | `darwin/arm64` |
 | Package | `fusedb/benchmarks/oneleafdb` |
@@ -53,27 +53,27 @@ GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `804.6-1009` | `1453-1748` | `12` |
-| OneLeaf | LZ4Dict4KB | `826.7-973.4` | `1828-2228` | `12-13` |
-| OneLeaf | LZ4Dict4KB + async WAL | `821.9-1063` | `1929-2106` | `11` |
-| Pebble | NoSync | `862.1-868.6` | `45` | `2` |
+| OneLeaf | raw | `1254-1319` | `1656-1829` | `12-13` |
+| OneLeaf | LZ4Dict4KB | `915.0-954.4` | `1971-2075` | `14-15` |
+| OneLeaf | LZ4Dict4KB + async WAL | `951.5-1485` | `1794-1870` | `12` |
+| Pebble | NoSync | `867.5-897.8` | `45` | `2` |
 
 ### Read
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw, 64K keys | `1222-1230` | `3289-3296` | `5` |
-| OneLeaf | LZ4Dict4KB, 64K keys | `1279-1291` | `3504-3510` | `5` |
-| Pebble | 5 MB block cache, 64K keys | `4026-4061` | `120` | `3` |
-| Pebble | no block cache, 64K keys | `4043-4085` | `120` | `3` |
+| OneLeaf | raw, 64K keys | `1259-1309` | `3226-3235` | `5` |
+| OneLeaf | LZ4Dict4KB, 64K keys | `1007-1028` | `334-335` | `5` |
+| Pebble | 5 MB block cache, 64K keys | `4039-4084` | `120` | `3` |
+| Pebble | no block cache, 64K keys | `4087-4365` | `120` | `3` |
 
 ### Mixed Put/Get
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `1436-1586` | `4043-4190` | `12` |
-| OneLeaf | LZ4Dict4KB | `2614-2753` | `5547-5890` | `14-15` |
-| Pebble | NoSync | `2825-2872` | `80` | `3` |
+| OneLeaf | raw | `1638-1949` | `3832-4153` | `11-12` |
+| OneLeaf | LZ4Dict4KB | `1314-1352` | `2541-2585` | `17` |
+| Pebble | NoSync | `867.5-897.8` | `80` | `3` |
 
 ### Open + Get
 
@@ -237,3 +237,19 @@ Average of 5 passes.
 - go-ycsb workload E is not included because OneLeaf does not expose DB-level scan/range reads yet.
 - go-ycsb workload F is measured as underlying DB calls, so its table mixes each generated read-modify-write operation's read and update calls.
 - RocksDB benchmarks are behind `-tags rocksdb` and were not included in this run.
+
+## Memory Optimization (2026-05-11)
+
+Eliminated closure allocations in buffer pooling:
+
+| Metric | Before | After | Improvement |
+|---|---:|---:|---:|
+| RSS under load | ~800 MB | 97-126 MB | 6.3-8.2x |
+| Heap allocated | - | 62.8 MB | - |
+| readFullAt allocs | 8.29M (24.57 GB) | 1.16M (35.50 MB) | 700x |
+
+Changes:
+
+- Replaced closure-based buffer release with `PooledBuffer` and `PooledDecompressBuffer` structs
+- Explicit `Release()` calls instead of defer for lower overhead
+- Lock-free decompression using `atomic.Bool`
