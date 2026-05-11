@@ -67,6 +67,14 @@ GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
 | Pebble | 5 MB block cache, 64K keys | `4043-4096` | `120` | `3` |
 | Pebble | no block cache, 64K keys | `4037-4235` | `120` | `3` |
 
+### Inc
+
+| Engine | Mode | ns/op | B/op | allocs/op |
+|---|---|---:|---:|---:|
+| OneLeaf | raw | `246.5-267.6` | `93` | `5` |
+| OneLeaf | LZ4Dict4KB | `249.5-261.6` | `93` | `5` |
+| OneLeaf | LZ4Dict4KB + async WAL | `264.2-406.4` | `305-881` | `5` |
+
 ### Mixed Put/Get
 
 | Engine | Mode | ns/op | B/op | allocs/op |

@@ -24,6 +24,14 @@ Fresh run after switching segment compression to `LZ4Dict4KB`.
 | Pebble | 5 MB block cache, 64K keys | `4062` | `120` | `3` |
 | Pebble | no block cache, 64K keys | `4036` | `120` | `3` |
 
+### Inc
+
+| Engine | Mode | ns/op | B/op | allocs/op |
+|---|---|---:|---:|---:|
+| OneLeaf | raw | `259` | `93` | `5` |
+| OneLeaf | LZ4Dict4KB | `257` | `93` | `5` |
+| OneLeaf | LZ4Dict4KB + async WAL | `319` | `544` | `5` |
+
 ### Mixed Put/Get
 
 | Engine | Mode | ns/op | B/op | allocs/op |
@@ -229,3 +237,19 @@ Main sources:
 - `value.EncodeBytes` (10.33%) - encoding
 - `Block.AddUnsafe` (10.26%) - block building
 - `skiplist.newNode` (4.36%) - index nodes
+
+### Inc Operation (93 B/op, 5 allocs/op)
+
+Per-operation breakdown (~19 B per allocation):
+1. Skiplist node lookup
+2. Value encoding (int64 varint)
+3. Op coalescing
+4. Atomic pointer swap
+5. Counter update
+
+Main sources:
+- `skiplist.Apply` - node traversal and update
+- `value.EncodeInt64` - varint encoding
+- `coalesceToNew` - operation merging
+- `ops.NewInc` - counter increment
+- Atomic operations overhead

@@ -272,6 +272,52 @@ func BenchmarkOneLeafPutAutoMerge5MBCompressedWAL(b *testing.B) {
 	}
 }
 
+func BenchmarkOneLeafIncAutoMerge5MB(b *testing.B) {
+	db, err := onedb.OpenDB(onedb.DBOptions{
+		Dir:            b.TempDir(),
+		ThresholdBytes: benchThreshold,
+		CacheBytes:     benchCacheBytes,
+	})
+	if err != nil {
+		b.Fatalf("open oneleaf: %v", err)
+	}
+	defer db.Close()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := db.Inc(onedb.DBKey(i%1024), 1); err != nil {
+			b.Fatalf("inc: %v", err)
+		}
+	}
+}
+
+func BenchmarkOneLeafIncAutoMerge5MBCompressed(b *testing.B) {
+	db := newOneLeafDBForBench(b, true, false)
+	defer db.Close()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := db.Inc(onedb.DBKey(i%1024), 1); err != nil {
+			b.Fatalf("inc: %v", err)
+		}
+	}
+}
+
+func BenchmarkOneLeafIncAutoMerge5MBCompressedWAL(b *testing.B) {
+	db := newOneLeafDBForBench(b, true, true)
+	defer db.Close()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := db.Inc(onedb.DBKey(i%1024), 1); err != nil {
+			b.Fatalf("inc: %v", err)
+		}
+	}
+}
+
 func BenchmarkOneLeafGet64K(b *testing.B) {
 	db := newSeededOneLeafDB(b, benchSeedKeys)
 	defer db.Close()
