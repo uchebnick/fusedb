@@ -16,6 +16,7 @@ import (
 	"github.com/uchebnick/fusedb/internal/segment"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/dgraph-io/badger/v4"
 )
 
 const (
@@ -852,4 +853,118 @@ func openPebbleLatencyProbeWithCache(t testing.TB, dir string, memTableSize int,
 		t.Fatalf("open pebble: %v", err)
 	}
 	return db, cache
+}
+
+// BadgerDB benchmarks
+
+func BenchmarkBadgerPutAutoMerge5MB(b *testing.B) {
+	db := openBadgerDB(b)
+	defer db.Close()
+
+	value := make([]byte, benchValueSize)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := onedb.DBKey(i)
+		if err := db.Update(func(txn *badger.Txn) error {
+			return txn.Set(key, value)
+		}); err != nil {
+			b.Fatalf("put: %v", err)
+		}
+	}
+}
+
+func BenchmarkBadgerGet64K(b *testing.B) {
+	db := openSeededBadgerDB(b, benchSeedKeys)
+	defer db.Close()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := onedb.DBKey(i % benchSeedKeys)
+		if err := db.View(func(txn *badger.Txn) error {
+			item, err := txn.Get(key)
+			if err != nil {
+				return err
+			}
+			return item.Value(func(val []byte) error {
+				oneLeafBenchSink = append(oneLeafBenchSink[:0], val...)
+				return nil
+			})
+		}); err != nil {
+			b.Fatalf("get: %v", err)
+		}
+	}
+}
+
+func BenchmarkBadgerMixedPutGet5MB(b *testing.B) {
+	db := openSeededBadgerDB(b, benchSeedKeys)
+	defer db.Close()
+
+	value := make([]byte, benchValueSize)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if i%2 == 0 {
+			key := onedb.DBKey(i)
+			if err := db.Update(func(txn *badger.Txn) error {
+				return txn.Set(key, value)
+			}); err != nil {
+				b.Fatalf("put: %v", err)
+			}
+		} else {
+			key := onedb.DBKey(i % benchSeedKeys)
+			if err := db.View(func(txn *badger.Txn) error {
+				item, err := txn.Get(key)
+				if err != nil {
+					return err
+				}
+				return item.Value(func(val []byte) error {
+					oneLeafBenchSink = append(oneLeafBenchSink[:0], val...)
+					return nil
+				})
+			}); err != nil {
+				b.Fatalf("get: %v", err)
+			}
+		}
+	}
+}
+
+func openBadgerDB(b testing.TB) *badger.DB {
+	b.Helper()
+
+	opts := badger.DefaultOptions(b.TempDir()).
+		WithLogger(nil).
+		WithMemTableSize(benchThreshold).
+		WithBaseTableSize(4 << 20).
+		WithValueThreshold(256).
+		WithValueLogFileSize(10 << 20).
+		WithSyncWrites(false).
+		WithNumMemtables(2)
+
+	db, err := badger.Open(opts)
+	if err != nil {
+		b.Fatalf("open badger: %v", err)
+	}
+
+	return db
+}
+
+func openSeededBadgerDB(b testing.TB, keys int) *badger.DB {
+	b.Helper()
+
+	db := openBadgerDB(b)
+
+	value := make([]byte, benchValueSize)
+	for i := 0; i < keys; i++ {
+		key := onedb.DBKey(i)
+		if err := db.Update(func(txn *badger.Txn) error {
+			return txn.Set(key, value)
+		}); err != nil {
+			db.Close()
+			b.Fatalf("seed badger %d: %v", i, err)
+		}
+	}
+
+	return db
 }

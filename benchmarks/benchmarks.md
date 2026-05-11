@@ -14,6 +14,7 @@ Fresh run after switching segment compression to `LZ4Dict4KB`.
 | OneLeaf | LZ4Dict4KB | `906.4` | `2017` | `12` |
 | OneLeaf | LZ4Dict4KB + async WAL | `1130` | `2226` | `12` |
 | Pebble | NoSync | `846.8` | `45` | `2` |
+| BadgerDB | NoSync | `8977` | `2181` | `41` |
 
 ### Read
 
@@ -23,6 +24,7 @@ Fresh run after switching segment compression to `LZ4Dict4KB`.
 | OneLeaf | LZ4Dict4KB, 64K keys | `1278` | `3554` | `5` |
 | Pebble | 5 MB block cache, 64K keys | `4062` | `120` | `3` |
 | Pebble | no block cache, 64K keys | `4036` | `120` | `3` |
+| BadgerDB | NoSync, 64K keys | `1874` | `1192` | `20` |
 
 ### Inc
 
@@ -39,6 +41,7 @@ Fresh run after switching segment compression to `LZ4Dict4KB`.
 | OneLeaf | raw | `1588` | `4136` | `12` |
 | OneLeaf | LZ4Dict4KB | `2321` | `4618` | `12` |
 | Pebble | NoSync | `2748` | `80` | `3` |
+| BadgerDB | NoSync | `5417` | `1841` | `32` |
 
 ### Open + Get
 

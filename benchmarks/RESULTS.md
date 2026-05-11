@@ -53,19 +53,21 @@ GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `1426-1738` | `1275-1387` | `10` |
-| OneLeaf | LZ4Dict4KB | `910.5-1010` | `1855-1999` | `13` |
-| OneLeaf | LZ4Dict4KB + async WAL | `1372-1705` | `2138-2732` | `11-13` |
-| Pebble | NoSync | `936.1-964.3` | `45-46` | `2` |
+| OneLeaf | raw | `1368-2432` | `1142-1594` | `9-11` |
+| OneLeaf | LZ4Dict4KB | `1082-1483` | `1901-2097` | `13-14` |
+| OneLeaf | LZ4Dict4KB + async WAL | `1001-1088` | `1926-2116` | `11` |
+| Pebble | NoSync | `1068-1097` | `45-46` | `2` |
+| BadgerDB | NoSync | `6148-12377` | `2133-2237` | `41` |
 
 ### Read
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw, 64K keys | `1304-1357` | `3227-3236` | `5` |
-| OneLeaf | LZ4Dict4KB, 64K keys | `1010-1121` | `334-335` | `5` |
-| Pebble | 5 MB block cache, 64K keys | `4043-4096` | `120` | `3` |
-| Pebble | no block cache, 64K keys | `4037-4235` | `120` | `3` |
+| OneLeaf | raw, 64K keys | `1358-1393` | `3229-3236` | `5` |
+| OneLeaf | LZ4Dict4KB, 64K keys | `1036-1101` | `334-335` | `5` |
+| Pebble | 5 MB block cache, 64K keys | `4083-6004` | `120` | `3` |
+| Pebble | no block cache, 64K keys | `4087-4273` | `120` | `3` |
+| BadgerDB | NoSync, 64K keys | `1740-2129` | `1187-1198` | `20` |
 
 ### Inc
 
@@ -79,9 +81,10 @@ GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `1821-2463` | `3395-3674` | `9-10` |
-| OneLeaf | LZ4Dict4KB | `1479-1511` | `2549-2648` | `16` |
-| Pebble | NoSync | `936.1-964.3` | `45-46` | `2` |
+| OneLeaf | raw | `1913-2712` | `3261-3574` | `9-10` |
+| OneLeaf | LZ4Dict4KB | `1432-1528` | `2283-2330` | `15` |
+| Pebble | NoSync | `2731-2885` | `82-83` | `3` |
+| BadgerDB | NoSync | `4818-6135` | `1825-1870` | `32` |
 
 ### Open + Get
 
