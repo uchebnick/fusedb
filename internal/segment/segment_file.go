@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"fusedb/internal/disk"
 )
@@ -13,7 +14,31 @@ import (
 const (
 	segmentFileExt = ".seg"
 	segmentTmpExt  = ".tmp"
+
+	blockSizeBuf = 1 << 10
 )
+
+var blockBufPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, DefaultTargetBlockSize + blockSizeBuf)
+		return &buf
+	},
+}
+
+// PooledBuffer wraps a buffer from the pool with a Release method.
+// Data is a slice referencing part of the pooled buffer.
+type PooledBuffer struct {
+	Data   []byte
+	bufPtr *[]byte
+}
+
+// Release returns the buffer to the pool.
+func (pb *PooledBuffer) Release() {
+	if pb != nil && pb.bufPtr != nil {
+		blockBufPool.Put(pb.bufPtr)
+		pb.bufPtr = nil
+	}
+}
 
 var (
 	ErrShortSegmentFile     = errors.New("segment: short segment file")
@@ -76,20 +101,26 @@ func OpenSegment(fs disk.FS, path string) (*Segment, error) {
 		return nil, ErrShortSegmentFile
 	}
 
-	headerBytes, err := readFullAt(f, 0, headerSize)
+	headerPB, err := readFullAt(f, 0, headerSize)
 	if err != nil {
 		return nil, fmt.Errorf("segment: read header: %w", err)
 	}
-	header, err := DecodeHeader(headerBytes)
+	defer headerPB.Release()
+	headerCopy := make([]byte, len(headerPB.Data))
+	copy(headerCopy, headerPB.Data)
+	header, err := DecodeHeader(headerCopy)
 	if err != nil {
 		return nil, fmt.Errorf("segment: decode header: %w", err)
 	}
 
-	footerBytes, err := readFullAt(f, fileSize-footerSize, footerSize)
+	footerPB, err := readFullAt(f, fileSize-footerSize, footerSize)
 	if err != nil {
 		return nil, fmt.Errorf("segment: read footer: %w", err)
 	}
-	footer, err := DecodeFooter(footerBytes)
+	defer footerPB.Release()
+	footerCopy := make([]byte, len(footerPB.Data))
+	copy(footerCopy, footerPB.Data)
+	footer, err := DecodeFooter(footerCopy)
 	if err != nil {
 		return nil, fmt.Errorf("segment: decode footer: %w", err)
 	}
@@ -97,11 +128,14 @@ func OpenSegment(fs disk.FS, path string) (*Segment, error) {
 		return nil, err
 	}
 
-	indexBytes, err := readSectionFrom(f, footer.Index)
+	indexPB, err := readSectionFrom(f, footer.Index)
 	if err != nil {
 		return nil, fmt.Errorf("segment: read index: %w", err)
 	}
-	index, err := DecodeIndex(indexBytes)
+	defer indexPB.Release()
+	indexCopy := make([]byte, len(indexPB.Data))
+	copy(indexCopy, indexPB.Data)
+	index, err := DecodeIndex(indexCopy)
 	if err != nil {
 		return nil, fmt.Errorf("segment: decode index: %w", err)
 	}
@@ -109,11 +143,14 @@ func OpenSegment(fs disk.FS, path string) (*Segment, error) {
 		return nil, ErrBlockCountMismatch
 	}
 
-	bloomBytes, err := readSectionFrom(f, footer.Bloom)
+	bloomPB, err := readSectionFrom(f, footer.Bloom)
 	if err != nil {
 		return nil, fmt.Errorf("segment: read bloom filter: %w", err)
 	}
-	bloom, err := DecodeBloomFilter(bloomBytes)
+	defer bloomPB.Release()
+	bloomCopy := make([]byte, len(bloomPB.Data))
+	copy(bloomCopy, bloomPB.Data)
+	bloom, err := DecodeBloomFilter(bloomCopy)
 	if err != nil {
 		return nil, fmt.Errorf("segment: decode bloom filter: %w", err)
 	}
@@ -146,7 +183,14 @@ func (s *Segment) readSection(section Section) ([]byte, error) {
 	}
 	defer f.Close()
 
-	return readSectionFrom(f, section)
+	pb, err := readSectionFrom(f, section)
+	if err != nil {
+		return nil, err
+	}
+	defer pb.Release()
+	result := make([]byte, len(pb.Data))
+	copy(result, pb.Data)
+	return result, nil
 }
 
 func (s *Segment) readBlockPayload(entry BlockIndexEntry) ([]byte, error) {
@@ -214,9 +258,9 @@ func validateSegmentLayout(fileSize uint64, footer Footer) error {
 	return nil
 }
 
-func readSectionFrom(r io.ReaderAt, section Section) ([]byte, error) {
+func readSectionFrom(r io.ReaderAt, section Section) (*PooledBuffer, error) {
 	if section.Length == 0 {
-		return []byte{}, nil
+		return &PooledBuffer{Data: []byte{}}, nil
 	}
 	if section.Length > uint64(maxInt()) {
 		return nil, ErrSegmentSectionTooBig
@@ -227,8 +271,18 @@ func readSectionFrom(r io.ReaderAt, section Section) ([]byte, error) {
 	return readFullAt(r, int64(section.Offset), int(section.Length))
 }
 
-func readFullAt(r io.ReaderAt, off int64, size int) ([]byte, error) {
-	buf := make([]byte, size)
+func readFullAt(r io.ReaderAt, off int64, size int) (*PooledBuffer, error) {
+	bufPtr := blockBufPool.Get().(*[]byte)
+	poolBuf := *bufPtr
+
+	var buf []byte
+	if size <= cap(poolBuf) {
+		buf = poolBuf[:size]
+	} else {
+		// Size exceeds pool buffer (reading index/bloom, not block data)
+		buf = make([]byte, size)
+	}
+
 	read := 0
 	for read < size {
 		n, err := r.ReadAt(buf[read:], off+int64(read))
@@ -237,6 +291,7 @@ func readFullAt(r io.ReaderAt, off int64, size int) ([]byte, error) {
 			break
 		}
 		if err != nil {
+			blockBufPool.Put(bufPtr)
 			return nil, err
 		}
 		if n == 0 {
@@ -244,9 +299,14 @@ func readFullAt(r io.ReaderAt, off int64, size int) ([]byte, error) {
 		}
 	}
 	if read != size {
+		blockBufPool.Put(bufPtr)
 		return nil, io.ErrUnexpectedEOF
 	}
-	return buf[:read], nil
+
+	return &PooledBuffer{
+		Data:   buf[:read],
+		bufPtr: bufPtr,
+	}, nil
 }
 
 func maxInt() int {
