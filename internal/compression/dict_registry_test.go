@@ -44,13 +44,14 @@ func TestPersistentRegistrySaveAndLazyLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compress: %v", err)
 	}
-	decoded, err := loaded.Decompress(compressed)
+	dpb, err := loaded.Decompress(compressed)
 	if err != nil {
 		t.Fatalf("decompress: %v", err)
 	}
-	if !bytes.Equal(decoded, payload) {
-		t.Fatalf("decoded payload = %q, want %q", decoded, payload)
+	if !bytes.Equal(dpb.Data, payload) {
+		t.Fatalf("decoded payload = %q, want %q", dpb.Data, payload)
 	}
+	dpb.Release()
 }
 
 func TestLRURegistryEvictsLeastRecentlyUsed(t *testing.T) {
@@ -137,15 +138,17 @@ func TestDictionaryConcurrentCompressDecompress(t *testing.T) {
 					errs <- fmt.Errorf("worker %d compress: %w", worker, err)
 					return
 				}
-				decoded, err := dict.Decompress(compressed)
+				dpb, err := dict.Decompress(compressed)
 				if err != nil {
 					errs <- fmt.Errorf("worker %d decompress: %w", worker, err)
 					return
 				}
-				if !bytes.Equal(decoded, payload) {
+				if !bytes.Equal(dpb.Data, payload) {
 					errs <- fmt.Errorf("worker %d decoded payload mismatch", worker)
+					dpb.Release()
 					return
 				}
+				dpb.Release()
 			}
 		}(worker)
 	}

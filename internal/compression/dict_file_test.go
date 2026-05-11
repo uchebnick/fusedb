@@ -54,11 +54,12 @@ func TestDictionaryRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compress: %v", err)
 	}
-	decoded, err := loaded.Decompress(compressed)
+	dpb, err := loaded.Decompress(compressed)
 	if err != nil {
 		t.Fatalf("decompress: %v", err)
 	}
-	if !bytes.Equal(decoded, payload) {
-		t.Fatalf("decoded payload = %q, want %q", decoded, payload)
+	if !bytes.Equal(dpb.Data, payload) {
+		t.Fatalf("decoded payload = %q, want %q", dpb.Data, payload)
 	}
+	dpb.Release()
 }
