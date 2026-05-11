@@ -98,9 +98,9 @@ func TestGoYCSBCoreLatency(t *testing.T) {
 	defer compressedDict.Close()
 	engines := []ycsbEngineSpec{
 		{name: "OneLeaf raw", open: openYCSBOneLeaf(false, false, nil)},
-		{name: "OneLeaf compressed", open: openYCSBOneLeaf(true, false, compressedDictRaw)},
+		{name: "OneLeaf LZ4Dict4KB", open: openYCSBOneLeaf(true, false, compressedDictRaw)},
 		{name: "OneLeaf raw + async WAL", open: openYCSBOneLeaf(false, true, nil)},
-		{name: "OneLeaf compressed + async WAL", open: openYCSBOneLeaf(true, true, compressedDictRaw)},
+		{name: "OneLeaf LZ4Dict4KB + async WAL", open: openYCSBOneLeaf(true, true, compressedDictRaw)},
 		{name: "Pebble NoSync", open: openYCSBPebble},
 	}
 
