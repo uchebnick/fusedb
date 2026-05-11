@@ -165,11 +165,12 @@ func TestOpenSegmentCompressed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read payload: %v", err)
 	}
-	payload, err = dict.Decompress(payload)
+	dpb, err := dict.Decompress(payload)
 	if err != nil {
 		t.Fatalf("decompress payload: %v", err)
 	}
-	block, err := DecodeBlock(payload)
+	defer dpb.Release()
+	block, err := DecodeBlock(dpb.Data)
 	if err != nil {
 		t.Fatalf("decode block: %v", err)
 	}

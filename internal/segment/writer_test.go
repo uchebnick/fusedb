@@ -212,11 +212,12 @@ func TestSegmentFreezeCompressed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read payload for %q: %v", tc.key, err)
 		}
-		payload, err = dict.Decompress(payload)
+		dpb, err := dict.Decompress(payload)
 		if err != nil {
 			t.Fatalf("decompress block for %q: %v", tc.key, err)
 		}
-		block, err := DecodeBlock(payload)
+		defer dpb.Release()
+		block, err := DecodeBlock(dpb.Data)
 		if err != nil {
 			t.Fatalf("decode decompressed block for %q: %v", tc.key, err)
 		}
