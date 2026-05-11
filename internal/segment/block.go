@@ -57,6 +57,15 @@ func (b *Block) Entries() []BlockEntry {
 	return b.entries
 }
 
+// Clone returns a deep copy of the block with all entries cloned.
+func (b *Block) Clone() Block {
+	clonedEntries := make([]BlockEntry, len(b.entries))
+	for i, entry := range b.entries {
+		clonedEntries[i] = entry.Clone()
+	}
+	return Block{entries: clonedEntries}
+}
+
 // Entry returns entry by position.
 func (b *Block) Entry(i int) (BlockEntry, bool) {
 	if i < 0 || i >= len(b.entries) {
@@ -107,7 +116,7 @@ func (b *Block) Separator() []byte {
 	if len(b.entries) == 0 {
 		return nil
 	}
-	return bytes.Clone(b.entries[len(b.entries)-1].Key)
+	return b.entries[len(b.entries)-1].Key
 }
 
 // Find returns value for exact key lookup.
