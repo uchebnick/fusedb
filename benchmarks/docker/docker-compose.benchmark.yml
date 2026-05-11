@@ -1,0 +1,118 @@
+services:
+  # OneLeaf read-only benchmark
+  oneleaf-read:
+    build:
+      context: ../..
+      dockerfile: benchmarks/docker/Dockerfile.benchmark
+    container_name: fusedb-oneleaf-read
+    environment:
+      - GOMAXPROCS=2
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+    volumes:
+      - ./configs/oneleaf-read.json:/config/benchmark.json:ro
+      - ./results:/results
+    networks:
+      - benchmark
+
+  # OneLeaf write-only benchmark
+  oneleaf-write:
+    build:
+      context: ../..
+      dockerfile: benchmarks/docker/Dockerfile.benchmark
+    container_name: fusedb-oneleaf-write
+    environment:
+      - GOMAXPROCS=2
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+    volumes:
+      - ./configs/oneleaf-write.json:/config/benchmark.json:ro
+      - ./results:/results
+    networks:
+      - benchmark
+
+  # OneLeaf mixed benchmark
+  oneleaf-mixed:
+    build:
+      context: ../..
+      dockerfile: benchmarks/docker/Dockerfile.benchmark
+    container_name: fusedb-oneleaf-mixed
+    environment:
+      - GOMAXPROCS=2
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+    volumes:
+      - ./configs/oneleaf-mixed.json:/config/benchmark.json:ro
+      - ./results:/results
+    networks:
+      - benchmark
+
+  # Pebble read-only benchmark
+  pebble-read:
+    build:
+      context: ../..
+      dockerfile: benchmarks/docker/Dockerfile.benchmark
+    container_name: fusedb-pebble-read
+    environment:
+      - GOMAXPROCS=2
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+    volumes:
+      - ./configs/pebble-read.json:/config/benchmark.json:ro
+      - ./results:/results
+    networks:
+      - benchmark
+
+  # Pebble write-only benchmark
+  pebble-write:
+    build:
+      context: ../..
+      dockerfile: benchmarks/docker/Dockerfile.benchmark
+    container_name: fusedb-pebble-write
+    environment:
+      - GOMAXPROCS=2
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+    volumes:
+      - ./configs/pebble-write.json:/config/benchmark.json:ro
+      - ./results:/results
+    networks:
+      - benchmark
+
+  # Pebble mixed benchmark
+  pebble-mixed:
+    build:
+      context: ../..
+      dockerfile: benchmarks/docker/Dockerfile.benchmark
+    container_name: fusedb-pebble-mixed
+    environment:
+      - GOMAXPROCS=2
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+    volumes:
+      - ./configs/pebble-mixed.json:/config/benchmark.json:ro
+      - ./results:/results
+    networks:
+      - benchmark
+
+networks:
+  benchmark:
+    driver: bridge

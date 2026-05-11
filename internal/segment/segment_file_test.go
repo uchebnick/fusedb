@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/disk"
 )
 
 func TestOpenSegmentRaw(t *testing.T) {

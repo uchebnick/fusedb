@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"fusedb/internal/compression"
-	onedb "fusedb/internal/oneleafdb"
+	"github.com/uchebnick/fusedb/internal/compression"
+	onedb "github.com/uchebnick/fusedb/internal/oneleafdb"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/magiconair/properties"

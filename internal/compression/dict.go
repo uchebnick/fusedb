@@ -35,7 +35,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/disk"
 
 	dictbuilder "github.com/klauspost/compress/dict"
 )

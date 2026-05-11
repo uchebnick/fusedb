@@ -7,7 +7,7 @@ import (
 	"hash/crc32"
 	"path/filepath"
 
-	"fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/disk"
 )
 
 const (

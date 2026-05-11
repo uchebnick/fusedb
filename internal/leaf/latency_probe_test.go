@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"fusedb/internal/disk"
-	"fusedb/internal/segment"
+	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/segment"
 )
 
 type latencySample struct {

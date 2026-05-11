@@ -5,7 +5,7 @@ import (
 	"iter"
 	"sync/atomic"
 
-	"fusedb/internal/ops"
+	"github.com/uchebnick/fusedb/internal/ops"
 
 	"github.com/cespare/xxhash/v2"
 )

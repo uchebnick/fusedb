@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"fusedb/internal/compression"
-	"fusedb/internal/disk"
-	onedb "fusedb/internal/oneleafdb"
-	"fusedb/internal/segment"
+	"github.com/uchebnick/fusedb/internal/compression"
+	"github.com/uchebnick/fusedb/internal/disk"
+	onedb "github.com/uchebnick/fusedb/internal/oneleafdb"
+	"github.com/uchebnick/fusedb/internal/segment"
 
 	"github.com/cockroachdb/pebble"
 )

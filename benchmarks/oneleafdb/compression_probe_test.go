@@ -7,10 +7,10 @@ import (
 	"sync"
 	"testing"
 
-	"fusedb/internal/compression"
-	onedb "fusedb/internal/oneleafdb"
-	"fusedb/internal/segment"
-	"fusedb/internal/value"
+	"github.com/uchebnick/fusedb/internal/compression"
+	onedb "github.com/uchebnick/fusedb/internal/oneleafdb"
+	"github.com/uchebnick/fusedb/internal/segment"
+	"github.com/uchebnick/fusedb/internal/value"
 
 	"github.com/golang/snappy"
 	"github.com/klauspost/compress/dict"

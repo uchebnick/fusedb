@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"fusedb/internal/value"
+	"github.com/uchebnick/fusedb/internal/value"
 )
 
 func TestDBCacheInvalidatesOnPutDeleteAndInc(t *testing.T) {

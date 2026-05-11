@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"fusedb/internal/ops"
-	"fusedb/internal/segment"
-	"fusedb/internal/value"
+	"github.com/uchebnick/fusedb/internal/ops"
+	"github.com/uchebnick/fusedb/internal/segment"
+	"github.com/uchebnick/fusedb/internal/value"
 )
 
 // Leaf owns one key-range local state: mutable buffer plus immutable segment.

@@ -1,0 +1,135 @@
+{
+  "dashboard": {
+    "title": "FuseDB Memory Usage",
+    "tags": ["fusedb", "memory"],
+    "timezone": "browser",
+    "refresh": "5s",
+    "time": {
+      "from": "now-15m",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Process Memory (RSS)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "process_resident_memory_bytes{db=\"oneleaf\"}",
+            "legendFormat": "OneleafDB"
+          },
+          {
+            "expr": "process_resident_memory_bytes{db=\"pebble\"}",
+            "legendFormat": "Pebble"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Heap Allocated",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "go_memstats_heap_alloc_bytes{db=\"oneleaf\"}",
+            "legendFormat": "OneleafDB Heap"
+          },
+          {
+            "expr": "go_memstats_heap_alloc_bytes{db=\"pebble\"}",
+            "legendFormat": "Pebble Heap"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "HTTP Request Rate",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "rate(http_requests_total{db=\"oneleaf\"}[1m])",
+            "legendFormat": "OneleafDB {{method}} {{path}}"
+          },
+          {
+            "expr": "rate(http_requests_total{db=\"pebble\"}[1m])",
+            "legendFormat": "Pebble {{method}} {{path}}"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "HTTP Request Latency (p95)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_nanoseconds_bucket{db=\"oneleaf\"}[1m])) / 1000000",
+            "legendFormat": "OneleafDB {{method}} {{path}}"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_nanoseconds_bucket{db=\"pebble\"}[1m])) / 1000000",
+            "legendFormat": "Pebble {{method}} {{path}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms"
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "GC Pause Time",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "rate(go_gc_duration_seconds_sum{db=\"oneleaf\"}[1m]) / rate(go_gc_duration_seconds_count{db=\"oneleaf\"}[1m])",
+            "legendFormat": "OneleafDB"
+          },
+          {
+            "expr": "rate(go_gc_duration_seconds_sum{db=\"pebble\"}[1m]) / rate(go_gc_duration_seconds_count{db=\"pebble\"}[1m])",
+            "legendFormat": "Pebble"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Total Allocations",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "rate(go_memstats_alloc_bytes_total{db=\"oneleaf\"}[1m])",
+            "legendFormat": "OneleafDB"
+          },
+          {
+            "expr": "rate(go_memstats_alloc_bytes_total{db=\"pebble\"}[1m])",
+            "legendFormat": "Pebble"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "Bps"
+          }
+        }
+      }
+    ]
+  }
+}

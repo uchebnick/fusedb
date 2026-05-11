@@ -1,0 +1,29 @@
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apk add --no-cache gcc musl-dev lz4-dev
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the benchmark runner
+RUN CGO_ENABLED=1 go build -o benchmark-runner ./cmd/benchmark-runner
+
+FROM alpine:latest
+
+RUN apk add --no-cache lz4-libs ca-certificates
+
+WORKDIR /app
+
+COPY --from=builder /build/benchmark-runner .
+
+# Create directories
+RUN mkdir -p /data /config /results
+
+ENTRYPOINT ["./benchmark-runner"]

@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"iter"
 
-	"fusedb/internal/compression"
-	"fusedb/internal/ops"
-	"fusedb/internal/segment"
-	"fusedb/internal/value"
+	"github.com/uchebnick/fusedb/internal/compression"
+	"github.com/uchebnick/fusedb/internal/ops"
+	"github.com/uchebnick/fusedb/internal/segment"
+	"github.com/uchebnick/fusedb/internal/value"
 )
 
 type Merger struct {

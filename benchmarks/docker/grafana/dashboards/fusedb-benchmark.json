@@ -1,0 +1,147 @@
+{
+  "dashboard": {
+    "title": "FuseDB Benchmark Comparison",
+    "tags": ["benchmark", "fusedb"],
+    "timezone": "browser",
+    "refresh": "5s",
+    "time": {
+      "from": "now-15m",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Current RPS (Linear Ramp-Up)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "benchmark_current_rps{engine=\"oneleaf\"}",
+            "legendFormat": "OneLeaf Current RPS"
+          },
+          {
+            "expr": "benchmark_current_rps{engine=\"pebble\"}",
+            "legendFormat": "Pebble Current RPS"
+          },
+          {
+            "expr": "benchmark_target_rps{engine=\"oneleaf\"}",
+            "legendFormat": "Target RPS"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Operations Rate",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "rate(benchmark_operations_total{engine=\"oneleaf\",status=\"success\"}[1m])",
+            "legendFormat": "OneLeaf {{operation}}"
+          },
+          {
+            "expr": "rate(benchmark_operations_total{engine=\"pebble\",status=\"success\"}[1m])",
+            "legendFormat": "Pebble {{operation}}"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Latency p50 (microseconds)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(benchmark_latency_nanoseconds_bucket{engine=\"oneleaf\"}[1m])) / 1000",
+            "legendFormat": "OneLeaf {{operation}}"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(benchmark_latency_nanoseconds_bucket{engine=\"pebble\"}[1m])) / 1000",
+            "legendFormat": "Pebble {{operation}}"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Latency p95 (microseconds)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(benchmark_latency_nanoseconds_bucket{engine=\"oneleaf\"}[1m])) / 1000",
+            "legendFormat": "OneLeaf {{operation}}"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(benchmark_latency_nanoseconds_bucket{engine=\"pebble\"}[1m])) / 1000",
+            "legendFormat": "Pebble {{operation}}"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Allocations per Operation",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "rate(benchmark_allocations_per_op_sum{engine=\"oneleaf\"}[1m]) / rate(benchmark_allocations_per_op_count{engine=\"oneleaf\"}[1m])",
+            "legendFormat": "OneLeaf {{operation}}"
+          },
+          {
+            "expr": "rate(benchmark_allocations_per_op_sum{engine=\"pebble\"}[1m]) / rate(benchmark_allocations_per_op_count{engine=\"pebble\"}[1m])",
+            "legendFormat": "Pebble {{operation}}"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Bytes Allocated per Operation",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "rate(benchmark_bytes_allocated_per_op_sum{engine=\"oneleaf\"}[1m]) / rate(benchmark_bytes_allocated_per_op_count{engine=\"oneleaf\"}[1m])",
+            "legendFormat": "OneLeaf {{operation}}"
+          },
+          {
+            "expr": "rate(benchmark_bytes_allocated_per_op_sum{engine=\"pebble\"}[1m]) / rate(benchmark_bytes_allocated_per_op_count{engine=\"pebble\"}[1m])",
+            "legendFormat": "Pebble {{operation}}"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Memory Usage",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+        "targets": [
+          {
+            "expr": "benchmark_memory_used_bytes{engine=\"oneleaf\"} / 1024 / 1024",
+            "legendFormat": "OneLeaf (MB)"
+          },
+          {
+            "expr": "benchmark_memory_used_bytes{engine=\"pebble\"} / 1024 / 1024",
+            "legendFormat": "Pebble (MB)"
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Goroutines",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+        "targets": [
+          {
+            "expr": "benchmark_goroutines{engine=\"oneleaf\"}",
+            "legendFormat": "OneLeaf"
+          },
+          {
+            "expr": "benchmark_goroutines{engine=\"pebble\"}",
+            "legendFormat": "Pebble"
+          }
+        ]
+      }
+    ]
+  },
+  "overwrite": true
+}

@@ -3,7 +3,7 @@ package skiplist
 import (
 	"bytes"
 	"fmt"
-	"fusedb/internal/ops"
+	"github.com/uchebnick/fusedb/internal/ops"
 	"testing"
 )
 

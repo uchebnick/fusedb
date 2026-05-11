@@ -1,7 +1,7 @@
 package skiplist
 
 import (
-	"fusedb/internal/ops"
+	"github.com/uchebnick/fusedb/internal/ops"
 	"testing"
 )
 

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"fusedb/internal/compression"
-	"fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/compression"
+	"github.com/uchebnick/fusedb/internal/disk"
 )
 
 func TestReaderGetRaw(t *testing.T) {

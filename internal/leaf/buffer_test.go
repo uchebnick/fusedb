@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"fusedb/internal/ops"
+	"github.com/uchebnick/fusedb/internal/ops"
 )
 
 func TestBufferPutReadOp(t *testing.T) {

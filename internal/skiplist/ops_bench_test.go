@@ -2,7 +2,7 @@ package skiplist
 
 import (
 	"encoding/binary"
-	"fusedb/internal/ops"
+	"github.com/uchebnick/fusedb/internal/ops"
 	"sync/atomic"
 	"testing"
 )

@@ -8,9 +8,9 @@ import (
 	"os"
 	"sort"
 
-	"fusedb/internal/compression"
-	"fusedb/internal/segment"
-	"fusedb/internal/value"
+	"github.com/uchebnick/fusedb/internal/compression"
+	"github.com/uchebnick/fusedb/internal/segment"
+	"github.com/uchebnick/fusedb/internal/value"
 )
 
 const jsonlScannerMaxToken = 16 << 20

@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # OneLeaf metrics
+  - job_name: 'oneleaf'
+    static_configs:
+      - targets: ['oneleaf:9090']
+        labels:
+          db: 'oneleaf'
+          instance: 'oneleaf-1'
+
+  # Pebble metrics
+  - job_name: 'pebble'
+    static_configs:
+      - targets: ['pebble:9090']
+        labels:
+          db: 'pebble'
+          instance: 'pebble-1'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

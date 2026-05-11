@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/disk"
 )
 
 func TestPersistentRegistrySaveAndLazyLoad(t *testing.T) {

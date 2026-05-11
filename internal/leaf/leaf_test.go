@@ -3,9 +3,9 @@ package leaf
 import (
 	"testing"
 
-	"fusedb/internal/disk"
-	"fusedb/internal/segment"
-	"fusedb/internal/value"
+	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/segment"
+	"github.com/uchebnick/fusedb/internal/value"
 )
 
 func TestLeafGetAppliesIncOverSegmentValue(t *testing.T) {

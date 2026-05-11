@@ -5,7 +5,7 @@ package oneleafdbbench
 import (
 	"testing"
 
-	onedb "fusedb/internal/oneleafdb"
+	onedb "github.com/uchebnick/fusedb/internal/oneleafdb"
 
 	"github.com/linxGnu/grocksdb"
 )

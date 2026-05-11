@@ -6,10 +6,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"fusedb/internal/compression"
-	"fusedb/internal/disk"
-	"fusedb/internal/leaf"
-	"fusedb/internal/segment"
+	"github.com/uchebnick/fusedb/internal/compression"
+	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/leaf"
+	"github.com/uchebnick/fusedb/internal/segment"
 )
 
 const (

@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"fusedb/internal/compression"
-	onedb "fusedb/internal/oneleafdb"
+	"github.com/uchebnick/fusedb/internal/compression"
+	onedb "github.com/uchebnick/fusedb/internal/oneleafdb"
 )
 
 func main() {

@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"testing"
 
-	"fusedb/internal/disk"
-	"fusedb/internal/ops"
-	"fusedb/internal/segment"
-	"fusedb/internal/skiplist"
-	"fusedb/internal/value"
+	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/ops"
+	"github.com/uchebnick/fusedb/internal/segment"
+	"github.com/uchebnick/fusedb/internal/skiplist"
+	"github.com/uchebnick/fusedb/internal/value"
 )
 
 var (

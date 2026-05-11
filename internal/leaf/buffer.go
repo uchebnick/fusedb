@@ -5,8 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"fusedb/internal/ops"
-	"fusedb/internal/skiplist"
+	"github.com/uchebnick/fusedb/internal/ops"
+	"github.com/uchebnick/fusedb/internal/skiplist"
 )
 
 // Buffer is a leaf-local mutable operation buffer.
