@@ -73,11 +73,11 @@ docker-compose restart oneleaf
 
 Based on previous benchmarks with equal constraints:
 
-| Metric | OneLeaf | Pebble | Winner |
-|--------|---------|--------|--------|
-| p50 Latency | ~1500 ns | ~4000 ns | **OneLeaf 2.7x faster** |
-| p95 Latency | ~3000 ns | ~6000 ns | **OneLeaf 2x faster** |
-| CPU Usage | ~80% | ~90% | **OneLeaf** |
-| Memory | ~300MB | ~350MB | **OneLeaf** |
+| Metric | OneLeaf | Pebble |
+|--------|---------|--------|
+| p50 Latency | ~1500 ns | ~4000 ns |
+| p95 Latency | ~3000 ns | ~6000 ns |
+| CPU Usage | ~80% | ~90% |
+| Memory | ~300MB | ~350MB |
 
-The dashboard will show real-time comparison!
+The dashboard will show real-time comparison.
