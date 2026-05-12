@@ -3,10 +3,11 @@ package skiplist
 import (
 	"bytes"
 	"fmt"
-	"github.com/uchebnick/fusedb/internal/ops"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/uchebnick/fusedb/internal/ops"
 )
 
 func TestConcurrentPutReadDifferentKeys(t *testing.T) {

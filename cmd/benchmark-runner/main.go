@@ -25,19 +25,19 @@ type BenchmarkConfig struct {
 }
 
 type BenchmarkResult struct {
-	Engine         string        `json:"engine"`
-	Workload       string        `json:"workload"`
-	TotalOps       int           `json:"total_ops"`
-	Duration       time.Duration `json:"duration"`
-	OpsPerSec      float64       `json:"ops_per_sec"`
-	AvgLatencyNs   int64         `json:"avg_latency_ns"`
-	P50LatencyNs   int64         `json:"p50_latency_ns"`
-	P95LatencyNs   int64         `json:"p95_latency_ns"`
-	P99LatencyNs   int64         `json:"p99_latency_ns"`
-	MaxLatencyNs   int64         `json:"max_latency_ns"`
-	AllocsPerOp    float64       `json:"allocs_per_op"`
-	BytesPerOp     float64       `json:"bytes_per_op"`
-	MemoryUsedMB   float64       `json:"memory_used_mb"`
+	Engine       string        `json:"engine"`
+	Workload     string        `json:"workload"`
+	TotalOps     int           `json:"total_ops"`
+	Duration     time.Duration `json:"duration"`
+	OpsPerSec    float64       `json:"ops_per_sec"`
+	AvgLatencyNs int64         `json:"avg_latency_ns"`
+	P50LatencyNs int64         `json:"p50_latency_ns"`
+	P95LatencyNs int64         `json:"p95_latency_ns"`
+	P99LatencyNs int64         `json:"p99_latency_ns"`
+	MaxLatencyNs int64         `json:"max_latency_ns"`
+	AllocsPerOp  float64       `json:"allocs_per_op"`
+	BytesPerOp   float64       `json:"bytes_per_op"`
+	MemoryUsedMB float64       `json:"memory_used_mb"`
 }
 
 func main() {

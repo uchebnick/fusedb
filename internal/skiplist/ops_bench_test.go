@@ -2,9 +2,10 @@ package skiplist
 
 import (
 	"encoding/binary"
-	"github.com/uchebnick/fusedb/internal/ops"
 	"sync/atomic"
 	"testing"
+
+	"github.com/uchebnick/fusedb/internal/ops"
 )
 
 var benchOpSink ops.Op

@@ -3,9 +3,10 @@ package skiplist
 import (
 	"bytes"
 	"fmt"
-	"github.com/uchebnick/fusedb/internal/ops"
 	"sync"
 	"testing"
+
+	"github.com/uchebnick/fusedb/internal/ops"
 )
 
 func TestReadPut(t *testing.T) {

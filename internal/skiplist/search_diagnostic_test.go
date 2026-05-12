@@ -3,8 +3,9 @@ package skiplist
 import (
 	"bytes"
 	"fmt"
-	"github.com/uchebnick/fusedb/internal/ops"
 	"testing"
+
+	"github.com/uchebnick/fusedb/internal/ops"
 )
 
 func TestReadPathDiagnostics64K(t *testing.T) {

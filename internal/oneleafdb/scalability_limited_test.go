@@ -11,11 +11,11 @@ func BenchmarkScalabilityLimitedRAM(b *testing.B) {
 		numKeys   int
 		cacheSize int64
 	}{
-		{"10K_512KB", 10_000, 512 << 10},    // 512KB cache for 1.28MB data
-		{"50K_512KB", 50_000, 512 << 10},    // 512KB cache for 6.4MB data
-		{"100K_1MB", 100_000, 1 << 20},      // 1MB cache for 12.8MB data
-		{"500K_2MB", 500_000, 2 << 20},      // 2MB cache for 64MB data
-		{"1M_2MB", 1_000_000, 2 << 20},      // 2MB cache for 128MB data
+		{"10K_512KB", 10_000, 512 << 10}, // 512KB cache for 1.28MB data
+		{"50K_512KB", 50_000, 512 << 10}, // 512KB cache for 6.4MB data
+		{"100K_1MB", 100_000, 1 << 20},   // 1MB cache for 12.8MB data
+		{"500K_2MB", 500_000, 2 << 20},   // 2MB cache for 64MB data
+		{"1M_2MB", 1_000_000, 2 << 20},   // 2MB cache for 128MB data
 	}
 
 	for _, size := range sizes {

@@ -20,7 +20,7 @@ const (
 
 var blockBufPool = sync.Pool{
 	New: func() interface{} {
-		buf := make([]byte, DefaultTargetBlockSize + blockSizeBuf)
+		buf := make([]byte, DefaultTargetBlockSize+blockSizeBuf)
 		return &buf
 	},
 }

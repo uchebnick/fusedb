@@ -60,9 +60,8 @@ var (
 )
 
 type Server struct {
-	db              *oneleafdb.DB
-	activeConns     int64
-	requestCounter  uint64
+	db          *oneleafdb.DB
+	activeConns int64
 }
 
 type GetRequest struct {

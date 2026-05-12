@@ -9,12 +9,12 @@ Embedded key-value database for hot mutable state.
 
 ## Performance
 
-vs Pebble (NoSync):
+Comparison with Pebble (NoSync mode):
 
-- **3x faster reads** — 1.3µs p50
-- **1.4x faster writes** — 292ns p50  
-- **117x faster startup** — 224ms open + first read
-- **Atomic counters** — 257ns Inc operation
+- Reads: 1.0µs vs 4.1µs
+- Writes: 1.1µs vs 1.1µs
+- Startup: 224ms vs 26s (open + first read)
+- Atomic counters: 257ns Inc operation
 
 ## Install
 

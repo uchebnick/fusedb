@@ -859,7 +859,7 @@ func openPebbleLatencyProbeWithCache(t testing.TB, dir string, memTableSize int,
 
 func BenchmarkBadgerPutAutoMerge5MB(b *testing.B) {
 	db := openBadgerDB(b)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	value := make([]byte, benchValueSize)
 	b.ReportAllocs()
@@ -876,7 +876,7 @@ func BenchmarkBadgerPutAutoMerge5MB(b *testing.B) {
 
 func BenchmarkBadgerGet64K(b *testing.B) {
 	db := openSeededBadgerDB(b, benchSeedKeys)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -899,7 +899,7 @@ func BenchmarkBadgerGet64K(b *testing.B) {
 
 func BenchmarkBadgerMixedPutGet5MB(b *testing.B) {
 	db := openSeededBadgerDB(b, benchSeedKeys)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	value := make([]byte, benchValueSize)
 	b.ReportAllocs()
@@ -961,7 +961,7 @@ func openSeededBadgerDB(b testing.TB, keys int) *badger.DB {
 		if err := db.Update(func(txn *badger.Txn) error {
 			return txn.Set(key, value)
 		}); err != nil {
-			db.Close()
+			_ = db.Close()
 			b.Fatalf("seed badger %d: %v", i, err)
 		}
 	}

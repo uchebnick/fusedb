@@ -8,8 +8,8 @@ import (
 // BenchmarkScalability tests OneLeaf performance at different dataset sizes
 func BenchmarkScalability(b *testing.B) {
 	sizes := []struct {
-		name     string
-		numKeys  int
+		name      string
+		numKeys   int
 		cacheSize int64
 	}{
 		{"10K", 10_000, 5 << 20},

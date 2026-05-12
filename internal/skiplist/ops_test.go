@@ -1,8 +1,9 @@
 package skiplist
 
 import (
-	"github.com/uchebnick/fusedb/internal/ops"
 	"testing"
+
+	"github.com/uchebnick/fusedb/internal/ops"
 )
 
 func TestMergeInc(t *testing.T) {

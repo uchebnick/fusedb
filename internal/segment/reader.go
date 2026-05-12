@@ -15,13 +15,12 @@ var (
 	ErrReaderFileNotOpen         = errors.New("segment: reader file is not open")
 )
 
-
 // Reader provides point-lookups over one frozen immutable segment.
 type Reader struct {
-	segment    *Segment
-	file       disk.File
-	dictionary *compression.Dictionary
-	closed     bool
+	segment      *Segment
+	file         disk.File
+	dictionary   *compression.Dictionary
+	closed       bool
 	blockBufPool sync.Pool
 }
 
@@ -59,8 +58,6 @@ func NewReader(segment *Segment, registry *compression.Registry) (*Reader, error
 
 	return reader, nil
 }
-
-
 
 // OpenReader loads one segment from file and binds it to a lookup reader.
 func OpenReader(fs disk.FS, path string, registry *compression.Registry) (*Reader, error) {

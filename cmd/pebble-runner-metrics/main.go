@@ -99,18 +99,18 @@ var (
 )
 
 type BenchmarkRunner struct {
-	db              *pebble.DB
-	recordCount     int
-	valueSize       int
-	currentRPS      atomic.Int64
-	targetRPS       int64
-	rampUpDuration  time.Duration
-	testDuration    time.Duration
-	readRatio       float64
-	stopChan        chan struct{}
-	wg              sync.WaitGroup
-	totalOps        atomic.Int64
-	startTime       time.Time
+	db             *pebble.DB
+	recordCount    int
+	valueSize      int
+	currentRPS     atomic.Int64
+	targetRPS      int64
+	rampUpDuration time.Duration
+	testDuration   time.Duration
+	readRatio      float64
+	stopChan       chan struct{}
+	wg             sync.WaitGroup
+	totalOps       atomic.Int64
+	startTime      time.Time
 }
 
 func main() {

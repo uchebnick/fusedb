@@ -26,13 +26,13 @@ type LoadGenerator struct {
 }
 
 type Stats struct {
-	requests    uint64
-	errors      uint64
+	requests     uint64
+	errors       uint64
 	totalLatency uint64
-	minLatency  uint64
-	maxLatency  uint64
-	mu          sync.Mutex
-	latencies   []uint64
+	minLatency   uint64
+	maxLatency   uint64
+	mu           sync.Mutex
+	latencies    []uint64
 }
 
 type Request struct {
@@ -49,11 +49,11 @@ type Response struct {
 
 func main() {
 	lg := &LoadGenerator{
-		oneleafURL:  getEnv("ONELEAF_URL", "http://oneleaf:8080"),
-		pebbleURL:   getEnv("PEBBLE_URL", "http://pebble:8080"),
-		duration:    parseDuration(getEnv("DURATION", "5m")),
-		rps:         parseInt(getEnv("RPS", "1000")),
-		workers:     parseInt(getEnv("WORKERS", "10")),
+		oneleafURL:   getEnv("ONELEAF_URL", "http://oneleaf:8080"),
+		pebbleURL:    getEnv("PEBBLE_URL", "http://pebble:8080"),
+		duration:     parseDuration(getEnv("DURATION", "5m")),
+		rps:          parseInt(getEnv("RPS", "1000")),
+		workers:      parseInt(getEnv("WORKERS", "10")),
 		oneleafStats: &Stats{minLatency: ^uint64(0)},
 		pebbleStats:  &Stats{minLatency: ^uint64(0)},
 	}
