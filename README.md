@@ -5,7 +5,7 @@
 
 Embedded key-value database for hot mutable state.
 
-[Русский](./README.ru.md)
+[Русский](./README.ru.md) | [Library Usage](./LIBRARY.md)
 
 ## Performance
 
