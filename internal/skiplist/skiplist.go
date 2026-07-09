@@ -3,6 +3,7 @@ package skiplist
 import (
 	"bytes"
 	"iter"
+	"runtime"
 	"sync/atomic"
 
 	"github.com/uchebnick/fusedb/internal/ops"
@@ -220,13 +221,17 @@ func (s *SkipList) findSpliceAtLevel(key []byte, targetLevel int32) (*node, *nod
 }
 
 func (s *SkipList) updateNode(n *node, op ops.Op) {
-	for {
+	for i := 0; ; i++ {
 		oldPtr := n.op.Load()
 
 		merged := coalesceToNew(*oldPtr, op)
 		if n.op.CompareAndSwap(oldPtr, &merged) {
 			s.dataBytes.Add(int64(len(merged.Data) - len(oldPtr.Data)))
 			return
+		}
+
+		if i&7 == 7 {
+			runtime.Gosched()
 		}
 	}
 }
