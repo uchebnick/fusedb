@@ -25,10 +25,10 @@ go get github.com/uchebnick/fusedb
 ## Использование
 
 ```go
-db, _ := fusedb.Open(fusedb.Options{
-    Dir:       "/tmp/db",
-    CacheSize: 5 << 20,
-    MergeSize: 5 << 20,
+db, _ := oneleafdb.OpenDB(oneleafdb.DBOptions{
+    Dir:            "/tmp/db",
+    CacheBytes:     5 << 20,
+    ThresholdBytes: 5 << 20,
 })
 defer db.Close()
 
