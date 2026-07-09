@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	onedb "github.com/uchebnick/fusedb/internal/oneleafdb"
+	onedb "github.com/uchebnick/fusedb/pkg/oneleafdb"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"

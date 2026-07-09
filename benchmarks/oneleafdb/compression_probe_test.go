@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/uchebnick/fusedb/internal/compression"
-	onedb "github.com/uchebnick/fusedb/internal/oneleafdb"
+	onedb "github.com/uchebnick/fusedb/pkg/oneleafdb"
 	"github.com/uchebnick/fusedb/internal/segment"
 	"github.com/uchebnick/fusedb/internal/value"
 

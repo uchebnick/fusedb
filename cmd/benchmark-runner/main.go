@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"time"
 
-	onedb "github.com/uchebnick/fusedb/internal/oneleafdb"
+	onedb "github.com/uchebnick/fusedb/pkg/oneleafdb"
 
 	"github.com/cockroachdb/pebble"
 )

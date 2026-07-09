@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/uchebnick/fusedb/internal/oneleafdb"
+	"github.com/uchebnick/fusedb/pkg/oneleafdb"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"

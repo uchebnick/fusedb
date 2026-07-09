@@ -12,7 +12,7 @@ import (
 
 	"github.com/uchebnick/fusedb/internal/compression"
 	"github.com/uchebnick/fusedb/internal/disk"
-	onedb "github.com/uchebnick/fusedb/internal/oneleafdb"
+	onedb "github.com/uchebnick/fusedb/pkg/oneleafdb"
 	"github.com/uchebnick/fusedb/internal/segment"
 
 	"github.com/cockroachdb/pebble"

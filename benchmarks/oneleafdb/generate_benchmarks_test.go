@@ -3,9 +3,9 @@ package oneleafdbbench
 import (
 	"bytes"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -62,17 +62,17 @@ type ycsbRow struct {
 }
 
 type ycsbSection struct {
-	title        string
+	title       string
 	description  string
 	columnsTitle string
-	rows         []ycsbRow
+	rows        []ycsbRow
 }
 
 type compressionRatioRow struct {
-	codec         string
+	codec        string
 	avgCompressed string
-	ratio         string
-	saved         string
+	ratio        string
+	saved        string
 }
 
 type compressionRatioSummary struct {
@@ -226,7 +226,7 @@ func parseYCSBOutput(out string) []ycsbSection {
 
 		if m := ycsbHeaderRE.FindStringSubmatch(line); len(m) > 0 {
 			sections = append(sections, ycsbSection{
-				title:       m[1],
+				title:      m[1],
 				description: m[2],
 			})
 			current = &sections[len(sections)-1]
@@ -273,10 +273,10 @@ func parseCompressionRatioOutput(out string) compressionRatioSummary {
 			continue
 		}
 		summary.rows = append(summary.rows, compressionRatioRow{
-			codec:         m[1],
+			codec:        m[1],
 			avgCompressed: m[2] + " B",
-			ratio:         m[3],
-			saved:         m[4] + "%",
+			ratio:        m[3],
+			saved:        m[4] + "%",
 		})
 	}
 	return summary

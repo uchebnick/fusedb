@@ -34,7 +34,7 @@ import (
 
 	"github.com/uchebnick/fusedb/internal/compression"
 	"github.com/uchebnick/fusedb/internal/disk"
-	"github.com/uchebnick/fusedb/internal/oneleafdb"
+	"github.com/uchebnick/fusedb/pkg/oneleafdb"
 )
 
 // DB is an embedded key-value database.

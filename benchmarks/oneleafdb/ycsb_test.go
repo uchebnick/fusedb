@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/uchebnick/fusedb/internal/compression"
-	onedb "github.com/uchebnick/fusedb/internal/oneleafdb"
+	onedb "github.com/uchebnick/fusedb/pkg/oneleafdb"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/magiconair/properties"
