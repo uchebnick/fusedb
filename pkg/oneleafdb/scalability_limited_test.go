@@ -20,39 +20,22 @@ func BenchmarkScalabilityLimitedRAM(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(size.name, func(b *testing.B) {
-			db, err := OpenDB(DBOptions{
+			opts := DBOptions{
 				Dir:            b.TempDir(),
 				ThresholdBytes: 10 << 20, // 10MB threshold
 				CacheBytes:     size.cacheSize,
-			})
-			if err != nil {
-				b.Fatalf("open db: %v", err)
+				DisableWAL:     true,
 			}
-			defer db.Close()
 
 			b.Logf("Inserting %d keys with %d bytes cache...", size.numKeys, size.cacheSize)
-			value := make([]byte, 128)
-			for i := 0; i < size.numKeys; i++ {
-				key := DBKey(i)
-				for j := range value {
-					value[j] = byte(i % 256)
-				}
-				if err := db.Put(key, value); err != nil {
-					b.Fatalf("put key %d: %v", i, err)
-				}
-			}
+			seedClosedDB(b, opts, size.numKeys, 128)
 
-			// Force merge to disk
-			if err := db.Merge(); err != nil {
-				b.Fatalf("merge: %v", err)
-			}
-
-			segmentPath := db.SegmentPath()
-			b.Logf("Merged to: %s", segmentPath)
-			b.Logf("Cache size: %d bytes, Data size: ~%d MB", size.cacheSize, (size.numKeys*128)/(1<<20))
-
-			// Clear cache to force cold reads
-			db.cache.clear()
+			// Reopening is what makes the reads cold: the close checkpointed
+			// every leaf into a segment and the new database starts with an
+			// empty cache that is far too small to hold the dataset.
+			db := reopenSeeded(b, opts)
+			b.Logf("Cache size: %d bytes, data size: ~%d MB, leaves: %d",
+				size.cacheSize, (size.numKeys*128)/(1<<20), db.LeafCount())
 
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -72,7 +55,7 @@ func BenchmarkScalabilityLimitedRAM(b *testing.B) {
 	}
 }
 
-// BenchmarkScalabilityColdReads tests pure disk reads with no cache
+// BenchmarkScalabilityColdReads tests pure disk reads with a near-useless cache
 func BenchmarkScalabilityColdReads(b *testing.B) {
 	sizes := []struct {
 		name    string
@@ -87,40 +70,24 @@ func BenchmarkScalabilityColdReads(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(size.name, func(b *testing.B) {
-			db, err := OpenDB(DBOptions{
+			opts := DBOptions{
 				Dir:            b.TempDir(),
 				ThresholdBytes: 10 << 20,
 				CacheBytes:     1024, // Tiny 1KB cache - essentially disabled
-			})
-			if err != nil {
-				b.Fatalf("open db: %v", err)
+				DisableWAL:     true,
 			}
-			defer db.Close()
 
 			b.Logf("Inserting %d keys with minimal cache...", size.numKeys)
-			value := make([]byte, 128)
-			for i := 0; i < size.numKeys; i++ {
-				key := DBKey(i)
-				for j := range value {
-					value[j] = byte(i % 256)
-				}
-				if err := db.Put(key, value); err != nil {
-					b.Fatalf("put key %d: %v", i, err)
-				}
-			}
+			seedClosedDB(b, opts, size.numKeys, 128)
 
-			if err := db.Merge(); err != nil {
-				b.Fatalf("merge: %v", err)
-			}
-
-			b.Logf("Data size: ~%d MB", (size.numKeys*128)/(1<<20))
+			db := reopenSeeded(b, opts)
+			b.Logf("Data size: ~%d MB, leaves: %d", (size.numKeys*128)/(1<<20), db.LeafCount())
 
 			b.ReportAllocs()
 			b.ResetTimer()
 
-			// Sequential reads to avoid OS page cache benefits
+			// Strided reads to defeat any locality the previous lookup left behind
 			for i := 0; i < b.N; i++ {
-				// Use different key each iteration to avoid cache
 				key := DBKey((i * 997) % size.numKeys) // Prime number for better distribution
 				_, ok, err := db.Get(key)
 				if err != nil {
@@ -151,33 +118,25 @@ func BenchmarkScalabilityWorstCase(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(size.name, func(b *testing.B) {
-			db, err := OpenDB(DBOptions{
+			opts := DBOptions{
 				Dir:            b.TempDir(),
 				ThresholdBytes: 10 << 20,
-				CacheBytes:     0, // No cache at all
-			})
-			if err != nil {
-				b.Fatalf("open db: %v", err)
+				// CacheBytes zero means "use the default", so it has to be
+				// negative to actually run without a value cache. This benchmark
+				// used to pass 0 and quietly measure a 5MB cache instead.
+				CacheBytes: -1,
+				DisableWAL: true,
 			}
-			defer db.Close()
 
 			b.Logf("Inserting %d keys with NO cache...", size.numKeys)
-			value := make([]byte, 128)
-			for i := 0; i < size.numKeys; i++ {
-				key := DBKey(i)
-				for j := range value {
-					value[j] = byte(i % 256)
-				}
-				if err := db.Put(key, value); err != nil {
-					b.Fatalf("put key %d: %v", i, err)
-				}
-			}
+			seedClosedDB(b, opts, size.numKeys, 128)
 
-			if err := db.Merge(); err != nil {
-				b.Fatalf("merge: %v", err)
+			db := reopenSeeded(b, opts)
+			if db.cache != nil {
+				b.Fatal("value cache is enabled: this benchmark measures the uncached read path")
 			}
-
-			b.Logf("Worst case: no cache, random access, %d MB data", (size.numKeys*128)/(1<<20))
+			b.Logf("Worst case: no cache, random access, %d MB data, %d leaves",
+				(size.numKeys*128)/(1<<20), db.LeafCount())
 
 			b.ReportAllocs()
 			b.ResetTimer()

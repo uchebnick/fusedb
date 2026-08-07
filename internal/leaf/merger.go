@@ -2,6 +2,7 @@ package leaf
 
 import (
 	"bytes"
+	"fmt"
 	"iter"
 
 	"github.com/uchebnick/fusedb/internal/compression"
@@ -39,6 +40,18 @@ func (m *Merger) resolve(segmentValue []byte, op *ops.Op) ([]byte, bool) {
 	default:
 		return segmentValue, true
 	}
+}
+
+// MergeIter returns the resolved stream of segment entries overlaid with
+// buffered operations.
+//
+// Yielded slices are borrowed from the source segment blocks and from buffer
+// memory; callers must not retain them past a yield.
+func (m *Merger) MergeIter(
+	segmentIter iter.Seq2[[]byte, []byte],
+	skipListIter iter.Seq2[[]byte, ops.Op],
+) iter.Seq2[[]byte, []byte] {
+	return m.mergeIter(segmentIter, skipListIter)
 }
 
 func (m *Merger) mergeIter(
@@ -100,8 +113,16 @@ func (m *Merger) mergeIter(
 	}
 }
 
+// merge rewrites the source segment together with buffered operations.
+//
+// segmentErr reports whether the source stream ended because the segment was
+// exhausted or because a block failed to read. It is checked before Freeze:
+// without that check a single unreadable block would silently drop every
+// remaining key, and the truncated result would then replace the healthy
+// segment.
 func (m *Merger) merge(
 	segmentIter iter.Seq2[[]byte, []byte],
+	segmentErr func() error,
 	opsIter iter.Seq2[[]byte, ops.Op],
 	opts segment.Options,
 ) (*segment.Segment, error) {
@@ -114,6 +135,13 @@ func (m *Merger) merge(
 		if err := newSegment.AppendKVUnsafe(key, value); err != nil {
 			_ = newSegment.Abort()
 			return nil, err
+		}
+	}
+
+	if segmentErr != nil {
+		if err := segmentErr(); err != nil {
+			_ = newSegment.Abort()
+			return nil, fmt.Errorf("leaf: merge source segment: %w", err)
 		}
 	}
 

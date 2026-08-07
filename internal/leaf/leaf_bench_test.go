@@ -252,7 +252,7 @@ func BenchmarkMergerMerge64K_1KUpdates(b *testing.B) {
 			BloomFalsePositive: 0.01,
 			Compression:        segment.CompressionNone,
 		}
-		merged, err := merger.merge(reader.Iter(), updates.Iter(), opts)
+		merged, err := merger.merge(reader.Iter(), nil, updates.Iter(), opts)
 		if err != nil {
 			b.Fatalf("merge: %v", err)
 		}
@@ -290,7 +290,7 @@ func BenchmarkMergerMerge64K_1KUpdatesOSFS(b *testing.B) {
 			BloomFalsePositive: 0.01,
 			Compression:        segment.CompressionNone,
 		}
-		merged, err := merger.merge(reader.Iter(), updates.Iter(), opts)
+		merged, err := merger.merge(reader.Iter(), nil, updates.Iter(), opts)
 		if err != nil {
 			b.Fatalf("merge: %v", err)
 		}

@@ -108,7 +108,8 @@ func readJSONLEntries(path string, maxRecords int, encodeValue bool) ([]workload
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	// Read-only handle: a failed close cannot invalidate the entries just read.
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64<<10), jsonlScannerMaxToken)

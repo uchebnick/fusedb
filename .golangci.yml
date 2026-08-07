@@ -15,6 +15,23 @@ linters:
     - gocritic
     - revive
 
+  settings:
+    errcheck:
+      check-blank: false
+
+  exclusions:
+    rules:
+      # A deferred Close in a test has no error path worth taking: the test has
+      # already passed or failed by the time it runs. Reporting them buried the
+      # errcheck findings that do matter in engine code.
+      #
+      # Deliberately scoped to tests rather than excluding (io.Closer).Close
+      # everywhere. Closing a file the engine wrote can fail with the data still
+      # unflushed, so that is precisely the case errcheck has to keep flagging.
+      - path: _test\.go
+        linters:
+          - errcheck
+
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0

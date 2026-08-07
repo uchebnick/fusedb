@@ -90,7 +90,8 @@ func OpenSegment(fs disk.FS, path string) (*Segment, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	// Read-only handle: a failed close cannot invalidate the segment just read.
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
@@ -181,7 +182,8 @@ func (s *Segment) readSection(section Section) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	// Read-only handle: a failed close cannot invalidate the section just read.
+	defer func() { _ = f.Close() }()
 
 	pb, err := readSectionFrom(f, section)
 	if err != nil {

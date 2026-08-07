@@ -3,7 +3,7 @@ package segment
 import (
 	"errors"
 	"fmt"
-	"sync"
+	"sync/atomic"
 
 	"github.com/uchebnick/fusedb/internal/compression"
 	"github.com/uchebnick/fusedb/internal/disk"
@@ -17,11 +17,10 @@ var (
 
 // Reader provides point-lookups over one frozen immutable segment.
 type Reader struct {
-	segment      *Segment
-	file         disk.File
-	dictionary   *compression.Dictionary
-	closed       bool
-	blockBufPool sync.Pool
+	segment    *Segment
+	file       disk.File
+	dictionary *compression.Dictionary
+	closed     atomic.Bool
 }
 
 // NewReader binds a frozen segment to a lookup reader and opens its file.
@@ -86,7 +85,7 @@ func (s *Segment) MayContain(key []byte) bool {
 
 // MayContain checks the segment-wide bloom filter.
 func (r *Reader) MayContain(key []byte) bool {
-	if r == nil || r.segment == nil || r.closed {
+	if r == nil || r.segment == nil || r.closed.Load() {
 		return false
 	}
 	return r.segment.Bloom.MayContain(key)
@@ -94,7 +93,7 @@ func (r *Reader) MayContain(key []byte) bool {
 
 // Get performs a point lookup.
 func (r *Reader) Get(key []byte) ([]byte, bool, error) {
-	if r == nil || r.segment == nil || r.closed {
+	if r == nil || r.segment == nil || r.closed.Load() {
 		return nil, false, ErrNilSegment
 	}
 	if !r.segment.Bloom.MayContain(key) {
@@ -110,11 +109,13 @@ func (r *Reader) Get(key []byte) ([]byte, bool, error) {
 }
 
 // Close releases file resources held by the reader.
+//
+// Close is safe to call concurrently with lookups and is idempotent: only the
+// goroutine that wins the closed flag closes the underlying file.
 func (r *Reader) Close() error {
-	if r == nil || r.closed {
+	if r == nil || !r.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	r.closed = true
 	if r.file == nil {
 		return nil
 	}
@@ -190,24 +191,32 @@ func (r *Reader) readBlockValue(entry BlockIndexEntry, key []byte) ([]byte, bool
 		return valueCopy, ok, nil
 	}
 
-	// No compression - copy since NewBlockView keeps references
-	payloadCopy := make([]byte, len(pb.Data))
-	copy(payloadCopy, pb.Data)
-	pb.Release()
-
-	view, err := NewBlockView(payloadCopy)
+	// The view borrows the pooled block buffer, so only the value that was
+	// actually found is copied out before the buffer goes back to the pool.
+	// Copying the whole block first, as this used to, cost a 4 KiB allocation on
+	// every lookup regardless of value size.
+	view, err := NewBlockView(pb.Data)
 	if err != nil {
+		pb.Release()
 		return nil, false, fmt.Errorf("segment: decode block: %w", err)
 	}
 	value, ok, err := view.Find(key)
 	if err != nil {
+		pb.Release()
 		return nil, false, fmt.Errorf("segment: find block value: %w", err)
 	}
-	return value, ok, nil
+
+	var valueCopy []byte
+	if ok && len(value) > 0 {
+		valueCopy = make([]byte, len(value))
+		copy(valueCopy, value)
+	}
+	pb.Release()
+	return valueCopy, ok, nil
 }
 
 func (r *Reader) readBlockPayload(entry BlockIndexEntry) (*PooledBuffer, error) {
-	if r == nil || r.segment == nil || r.closed {
+	if r == nil || r.segment == nil || r.closed.Load() {
 		return nil, ErrNilSegment
 	}
 	section, err := r.segment.blockSection(entry)

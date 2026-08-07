@@ -1,12 +1,19 @@
-# OneLeaf Benchmarks
+# FuseDB Benchmarks
 
-Fresh run after switching segment compression to `LZ4Dict4KB`.
+Two runs are recorded here.
+
+**Throughput and write amplification (`2026-08-04`)** were measured against the
+current engine: a key-ordered tree of leaves with a recovering write-ahead log.
+
+**Latency, go-ycsb and compression** below still come from the `2026-05-11` run
+against the previous single-segment engine. They have not been re-measured and
+are kept for reference only; the sections are marked where they begin.
 
 ## Environment
 
 | Field | Value |
 |---|---|
-| Date | `2026-05-11` |
+| Date | `2026-08-04` (throughput), `2026-05-11` (latency, ycsb, compression) |
 | Machine | `Apple M4` |
 | OS/Arch | `darwin/arm64` |
 | Package | `fusedb/benchmarks/oneleafdb` |
@@ -21,8 +28,14 @@ Fresh run after switching segment compression to `LZ4Dict4KB`.
 ## Commands
 
 ```bash
+GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb -run '^$' \
+  -bench 'OneLeafPutAutoMerge5MB$|OneLeafIncAutoMerge5MB$|OneLeafGet64K$|OneLeafMixedPutGet5MB$|OneLeafOpenGet64K$|PebblePutNoSync$|PebbleGet64K$|PebbleOpenGet64KNoBlockCache$' \
+  -benchmem -benchtime=1s -count=3
+```
+
+```bash
 GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
-  -run '^$' -bench 'Benchmark(OneLeaf|Pebble)' -benchmem -benchtime=2s -count=3
+  -run TestWriteAmplification -v -count=1
 ```
 
 ```bash
@@ -47,51 +60,76 @@ GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
   -benchmem -benchtime=2s -count=5
 ```
 
-## Throughput
+## Throughput (`2026-08-04`, leaf tree)
+
+Ranges span 3 runs. Both engines use `LZ4Dict4KB` and a `5 MB` cache; FuseDB
+runs with the recovering WAL in async group-commit mode. The BadgerDB and
+`raw`/no-WAL variants from the previous run were not re-measured and are
+dropped rather than carried forward next to fresh numbers.
 
 ### Put
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `1368-2432` | `1142-1594` | `9-11` |
-| OneLeaf | LZ4Dict4KB | `1082-1483` | `1901-2097` | `13-14` |
-| OneLeaf | LZ4Dict4KB + async WAL | `1001-1088` | `1926-2116` | `11` |
-| Pebble | NoSync | `1068-1097` | `45-46` | `2` |
-| BadgerDB | NoSync | `6148-12377` | `2133-2237` | `41` |
+| FuseDB | LZ4Dict4KB + async WAL | `1029-1032` | `1481-1586` | `9` |
+| Pebble | NoSync | `831.0-878.9` | `45-46` | `2` |
 
 ### Read
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw, 64K keys | `1358-1393` | `3229-3236` | `5` |
-| OneLeaf | LZ4Dict4KB, 64K keys | `1036-1101` | `334-335` | `5` |
-| Pebble | 5 MB block cache, 64K keys | `4083-6004` | `120` | `3` |
-| Pebble | no block cache, 64K keys | `4087-4273` | `120` | `3` |
-| BadgerDB | NoSync, 64K keys | `1740-2129` | `1187-1198` | `20` |
+| FuseDB | LZ4Dict4KB, 64K keys | `1064-1129` | `411-412` | `5` |
+| Pebble | 5 MB block cache, 64K keys | `4246-4389` | `120` | `3` |
 
 ### Inc
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `246.5-267.6` | `93` | `5` |
-| OneLeaf | LZ4Dict4KB | `249.5-261.6` | `93` | `5` |
-| OneLeaf | LZ4Dict4KB + async WAL | `264.2-406.4` | `305-881` | `5` |
+| FuseDB | LZ4Dict4KB + async WAL | `407.5-481.5` | `239-252` | `6` |
 
 ### Mixed Put/Get
 
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | raw | `1913-2712` | `3261-3574` | `9-10` |
-| OneLeaf | LZ4Dict4KB | `1432-1528` | `2283-2330` | `15` |
-| Pebble | NoSync | `2731-2885` | `82-83` | `3` |
-| BadgerDB | NoSync | `4818-6135` | `1825-1870` | `32` |
+| FuseDB | LZ4Dict4KB + async WAL | `1340-1358` | `1510-1629` | `10` |
 
 ### Open + Get
 
+Both rows now close the database, reopen the directory from scratch, and read.
+
+The previous run reported `233669-254753 ns` for this row, but that benchmark
+never reopened anything: it installed a segment reader into a live database, so
+it measured neither the manifest load nor the segment open. The number below is
+roughly 30x larger because it is the first one that measures a cold start.
+
 | Engine | Mode | ns/op | B/op | allocs/op |
 |---|---|---:|---:|---:|
-| OneLeaf | open reader + get, 64K keys | `233669-254753` | `517323-517343` | `5312` |
-| Pebble | open DB + get, no block cache | `25612791-26863712` | `368247-374979` | `838-843` |
+| FuseDB | reopen dir + get, 64K keys | `7354926-7764032` | `805263-805498` | `5343` |
+| Pebble | open DB + get, no block cache | `26310078-26639042` | `388774-392132` | `844-852` |
+
+## Write Amplification (`2026-08-04`)
+
+Bytes counted at the filesystem `Write`/`WriteAt` call, so every rewrite is
+included; summing surviving file sizes would only report live data. Merge runs
+after every 4000 keys, which models a database kept continuously up to date.
+`one leaf` holds the whole keyspace in one segment, reproducing the previous
+engine; `splitting` lets leaves divide at 1 MiB.
+
+| Keys | User MB | One leaf written MB | One leaf amp | Splitting written MB | Splitting amp | Leaves |
+|---:|---:|---:|---:|---:|---:|---:|
+| 20000 | `2.82` | `9.40` | `3.33x` | `5.01` | `1.78x` | 3 |
+| 40000 | `5.65` | `34.47` | `6.11x` | `11.37` | `2.01x` | 6 |
+| 80000 | `11.29` | `131.61` | `11.66x` | `23.68` | `2.10x` | 12 |
+| 160000 | `22.58` | `513.88` | `22.76x` | `46.65` | `2.07x` | 23 |
+
+A single segment must be rewritten in full on every merge, so its amplification
+tracks the dataset size. Splitting keeps each merge inside one leaf, and
+amplification stays flat while the data grows 8x.
+
+## Reference: previous run (`2026-05-11`, single segment)
+
+Everything below was measured against the earlier single-segment engine and has
+not been re-run. Treat it as historical.
 
 ## Latency
 

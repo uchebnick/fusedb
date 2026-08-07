@@ -1,6 +1,7 @@
 package leaf
 
 import (
+	"bytes"
 	"iter"
 	"sync"
 	"sync/atomic"
@@ -16,15 +17,41 @@ type Leaf struct {
 	id   uint64
 	seed uint64
 
+	// lowKey is the inclusive lower bound of the leaf range. It is immutable
+	// for the life of the leaf; a leaf never widens or narrows, it is replaced
+	// by new leaves when it splits. An empty lowKey marks the leftmost leaf.
+	lowKey []byte
+
+	// segmentKeys tracks how many keys the current segment holds so the next
+	// merge can size its bloom filter for the merged result rather than for
+	// the buffer alone.
+	segmentKeys atomic.Int64
+
+	// writeMu keeps buffered writes from racing a split. Writers take the read
+	// side, a split takes the write side and marks the leaf detached, which
+	// tells writers that were waiting to retry against the new tree.
+	writeMu  sync.RWMutex
+	detached bool
+
 	buffer *Buffer
 	reader atomic.Pointer[segment.Reader]
 
 	merger *Merger
 
+	// retireHook, when set, takes over disposal of replaced segment readers.
+	retireHook func(*segment.Reader)
+
 	retired         chan retiredReader
 	readerCloseStop chan struct{}
 	readerCloseDone chan struct{}
 	closeOnce       sync.Once
+
+	// The cleanup goroutine starts on first use rather than at construction.
+	// A tree holds one leaf per key range, so starting it eagerly would leave
+	// one sleeping goroutine per leaf; with a retire hook installed the leaf
+	// never needs its own worker at all.
+	retireWorkerOnce    sync.Once
+	retireWorkerStarted atomic.Bool
 }
 
 type retiredReader struct {
@@ -70,19 +97,71 @@ func (l *Leaf) spawnReaderCloseWorker(ttl time.Duration) {
 }
 
 // NewLeaf creates a leaf with an empty buffer and optional segment reader.
+//
+// The leaf covers the whole keyspace. Use NewRangeLeaf for a leaf that owns
+// only part of it.
 func NewLeaf(id, seed uint64, reader *segment.Reader, merger *Merger) *Leaf {
+	return NewRangeLeaf(id, seed, nil, reader, merger, 0)
+}
+
+// NewRangeLeaf creates a leaf that owns keys from lowKey onwards.
+//
+// segmentKeys is the key count of reader's segment, used to size bloom filters
+// on the next merge. Zero is safe but makes the next filter smaller than ideal.
+func NewRangeLeaf(
+	id, seed uint64,
+	lowKey []byte,
+	reader *segment.Reader,
+	merger *Merger,
+	segmentKeys int64,
+) *Leaf {
 	leaf := &Leaf{
 		id:              id,
 		seed:            seed,
+		lowKey:          bytes.Clone(lowKey),
 		buffer:          NewBuffer(seed),
 		merger:          merger,
 		retired:         make(chan retiredReader, defaultRetiredReaderBufSize),
 		readerCloseStop: make(chan struct{}),
 		readerCloseDone: make(chan struct{}),
 	}
+	leaf.segmentKeys.Store(segmentKeys)
 	leaf.reader.Store(reader)
-	leaf.spawnReaderCloseWorker(defaultReaderRetireTTL)
 	return leaf
+}
+
+// ID returns the leaf identifier.
+func (l *Leaf) ID() uint64 {
+	if l == nil {
+		return 0
+	}
+	return l.id
+}
+
+// LowKey returns the inclusive lower bound of the leaf range.
+//
+// The returned slice is leaf-owned and must not be mutated.
+func (l *Leaf) LowKey() []byte {
+	if l == nil {
+		return nil
+	}
+	return l.lowKey
+}
+
+// SegmentKeys returns the key count of the current segment.
+func (l *Leaf) SegmentKeys() int64 {
+	if l == nil {
+		return 0
+	}
+	return l.segmentKeys.Load()
+}
+
+// Reader returns the current segment reader, which may be nil.
+func (l *Leaf) Reader() *segment.Reader {
+	if l == nil {
+		return nil
+	}
+	return l.reader.Load()
 }
 
 // Get returns the materialized user value for key.
@@ -150,8 +229,11 @@ func decodeUserValue(encoded []byte) ([]byte, bool, error) {
 }
 
 // Put buffers a byte value replacement for key.
+//
+// EncodeBytes already returns a freshly allocated buffer, so ownership is
+// handed straight to the buffer instead of paying for a second copy.
 func (l *Leaf) Put(key, raw []byte) {
-	l.buffer.Put(key, value.EncodeBytes(raw))
+	l.buffer.PutOwned(key, value.EncodeBytes(raw))
 }
 
 // Delete buffers a delete tombstone for key.
@@ -172,6 +254,19 @@ func (l *Leaf) BufferedLen() int64 {
 	return l.buffer.Len()
 }
 
+// PendingLen returns the number of buffered keys across both layers.
+//
+// BufferedLen only counts the active layer, so it reads as zero right after a
+// freeze even though the frozen operations still have to reach a segment. Merge
+// decisions must use this instead, or a checkpoint would freeze every buffer,
+// conclude there was nothing to do, and drop the log records covering it.
+func (l *Leaf) PendingLen() int64 {
+	if l == nil {
+		return 0
+	}
+	return l.buffer.Len() + l.buffer.FrozenLen()
+}
+
 // BufferedBytes returns active buffered operation payload bytes.
 func (l *Leaf) BufferedBytes() int64 {
 	if l == nil {
@@ -184,16 +279,18 @@ func (l *Leaf) Merge(opts segment.Options) error {
 	if l == nil || l.merger == nil {
 		return nil
 	}
-	if !l.buffer.Freeze() {
-		return nil
-	}
+	// A false result means a previous merge failed after freezing. Continuing
+	// with that frozen layer is required for progress: bailing out here would
+	// make every later merge a silent no-op and strand the buffered writes.
+	l.buffer.Freeze()
 
 	segmentIter := emptySegmentIter
+	segmentErr := func() error { return nil }
 	if reader := l.reader.Load(); reader != nil {
-		segmentIter = reader.Iter()
+		segmentIter, segmentErr = reader.IterWithErr()
 	}
 
-	newSegment, err := l.merger.merge(segmentIter, l.buffer.IterFrozen(), opts)
+	newSegment, err := l.merger.merge(segmentIter, segmentErr, l.buffer.IterFrozen(), opts)
 	if err != nil {
 		return err
 	}
@@ -219,8 +316,11 @@ func (l *Leaf) Close() error {
 
 	var err error
 	l.closeOnce.Do(func() {
-		close(l.readerCloseStop)
-		<-l.readerCloseDone
+		// Only stop the worker if something ever retired a reader through it.
+		if l.retireWorkerStarted.Load() {
+			close(l.readerCloseStop)
+			<-l.readerCloseDone
+		}
 
 		if reader := l.reader.Swap(nil); reader != nil {
 			err = reader.Close()
@@ -229,14 +329,55 @@ func (l *Leaf) Close() error {
 	return err
 }
 
+// SetRetireHook redirects retired readers to an external owner.
+//
+// A tree holds many leaves, so a per-leaf cleanup goroutine would scale with
+// the leaf count for work that is naturally shared. With a hook installed the
+// leaf stops using its own queue and the owner decides when a replaced segment
+// is closed and deleted.
+func (l *Leaf) SetRetireHook(hook func(*segment.Reader)) {
+	if l == nil {
+		return
+	}
+	l.retireHook = hook
+}
+
+// RetireSegment hands the current segment reader to the retire path and leaves
+// the leaf without a segment.
+//
+// It is used when a leaf is replaced by a split: the segment it was built from
+// is already superseded, but in-flight lookups may still be reading it.
+func (l *Leaf) RetireSegment() {
+	if l == nil {
+		return
+	}
+	if reader := l.reader.Swap(nil); reader != nil {
+		l.retireReader(reader)
+	}
+}
+
 func (l *Leaf) retireReader(reader *segment.Reader) {
 	if reader == nil {
 		return
 	}
+	if l.retireHook != nil {
+		l.retireHook(reader)
+		return
+	}
+
+	l.ensureRetireWorker()
 	l.retired <- retiredReader{
 		createdTime: time.Now(),
 		reader:      reader,
 	}
+}
+
+// ensureRetireWorker starts the cleanup goroutine on first retirement.
+func (l *Leaf) ensureRetireWorker() {
+	l.retireWorkerOnce.Do(func() {
+		l.retireWorkerStarted.Store(true)
+		l.spawnReaderCloseWorker(defaultReaderRetireTTL)
+	})
 }
 
 func closeExpiredReaders(queue []retiredReader, now time.Time, ttl time.Duration) []retiredReader {

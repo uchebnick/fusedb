@@ -12,7 +12,8 @@ func ReadFile(fs FS, name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	// Read-only handle: a failed close cannot invalidate bytes already read.
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {

@@ -37,10 +37,17 @@ func KindOf(data []byte) (Kind, error) {
 }
 
 // EncodeBytes wraps raw bytes with a value kind tag.
+//
+// EncodeBytes never writes into the caller's backing array: appending the tag
+// in place would corrupt bytes past len(data) whenever the caller passed a
+// slice with spare capacity. The returned slice is owned by the caller and is
+// safe to hand to an ownership-taking constructor such as ops.NewPutOwned.
 func EncodeBytes(data []byte) []byte {
-	data = append(data, byte(KindBytes))
+	encoded := make([]byte, len(data)+1)
+	copy(encoded, data)
+	encoded[len(data)] = byte(KindBytes)
 
-	return data
+	return encoded
 }
 
 // DecodeBytes returns the tagged bytes value payload.

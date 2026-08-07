@@ -79,6 +79,13 @@ func (s *SkipList) Apply(key []byte, op ops.Op) {
 	var prevList, nextList [maxHeight]*node
 
 	for {
+		// The height must be sampled before findSplice, not after. findSplice
+		// fills levels below the height it observes; reading a larger height
+		// afterwards makes prepareNewLevels believe the levels in between are
+		// already filled, and publishUpperLevels then dereferences a nil
+		// predecessor. Sampling first guarantees oldHeight never exceeds the
+		// height findSplice worked with, because the height only grows.
+		oldHeight := s.height.Load()
 		s.findSplice(key, &prevList, &nextList)
 
 		if next := nextList[0]; next != nil && bytes.Equal(next.key, key) {
@@ -87,7 +94,6 @@ func (s *SkipList) Apply(key []byte, op ops.Op) {
 		}
 
 		nodeHeight := s.randomHeight(key)
-		oldHeight := s.height.Load()
 
 		s.prepareNewLevels(oldHeight, nodeHeight, &prevList, &nextList)
 

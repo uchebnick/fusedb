@@ -35,7 +35,8 @@ func (osFS) SyncDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// The Sync result is what matters here; the directory handle is read-only.
+	defer func() { _ = f.Close() }()
 	return f.Sync()
 }
 

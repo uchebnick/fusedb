@@ -9,6 +9,17 @@ import (
 	"github.com/uchebnick/fusedb/internal/skiplist"
 )
 
+// layers is the immutable pair of operation lists a buffer exposes.
+//
+// Holding both in one value is what makes freezing atomic for readers. With
+// separate pointers for active and frozen, a reader could observe the moment
+// between "active replaced" and "frozen published" and find a key in neither
+// layer, which reads as a missing key and, for a counter, as a lost increment.
+type layers struct {
+	active *skiplist.SkipList
+	frozen *skiplist.SkipList
+}
+
 // Buffer is a leaf-local mutable operation buffer.
 //
 // Buffer is intentionally thin: it owns the ergonomic mutation API for a leaf,
@@ -16,8 +27,7 @@ import (
 type Buffer struct {
 	freezeMu sync.Mutex
 	seed     uint64
-	active   atomic.Pointer[skiplist.SkipList]
-	frozen   atomic.Pointer[skiplist.SkipList]
+	state    atomic.Pointer[layers]
 }
 
 // NewBuffer creates an empty leaf mutation buffer.
@@ -27,7 +37,7 @@ func NewBuffer(seed uint64) *Buffer {
 	buffer := &Buffer{
 		seed: seed,
 	}
-	buffer.active.Store(skiplist.NewSkipList(seed))
+	buffer.state.Store(&layers{active: skiplist.NewSkipList(seed)})
 	return buffer
 }
 
@@ -68,6 +78,15 @@ func (b *Buffer) Put(key []byte, value []byte) {
 	b.Apply(key, ops.NewPut(value))
 }
 
+// PutOwned buffers a value replacement for key without copying value.
+//
+// The caller transfers ownership of value and must never touch it again. Leaf
+// uses this for freshly encoded values so a Put costs one allocation instead of
+// an encode followed by a defensive clone.
+func (b *Buffer) PutOwned(key []byte, value []byte) {
+	b.Apply(key, ops.NewPutOwned(value))
+}
+
 // Delete buffers a delete tombstone for key.
 func (b *Buffer) Delete(key []byte) {
 	b.Apply(key, ops.NewDelete())
@@ -80,12 +99,17 @@ func (b *Buffer) Inc(key []byte, delta int64) {
 
 // ReadOp returns the buffered operation for key without copying Op.Data.
 //
+// Both layers are read from one snapshot, so a concurrent freeze cannot hide a
+// key that is present in either of them.
+//
 // The returned Op is a zero-copy view of immutable buffer-owned data. Callers
 // must not mutate returned Op.Data. Use SafeReadOp when an owned copy is needed.
 func (b *Buffer) ReadOp(key []byte) (ops.Op, bool) {
-	active, hasActive := b.activeList().Read(key)
-	if frozen := b.frozen.Load(); frozen != nil {
-		frozenOp, hasFrozen := frozen.Read(key)
+	state := b.load()
+
+	active, hasActive := state.active.Read(key)
+	if state.frozen != nil {
+		frozenOp, hasFrozen := state.frozen.Read(key)
 		return mergeLayeredOps(frozenOp, hasFrozen, active, hasActive)
 	}
 	if hasActive {
@@ -120,21 +144,28 @@ func (b *Buffer) SafeIterOps() iter.Seq2[[]byte, ops.Op] {
 //
 // Writes after Freeze go into a fresh active skiplist. If frozen operations are
 // already present, Freeze returns false and leaves the buffer unchanged.
+//
+// Callers must exclude writers around this call: a write that lands in the old
+// active list after a merge has already walked it would be dropped by the
+// following ClearFrozen.
 func (b *Buffer) Freeze() bool {
 	b.freezeMu.Lock()
 	defer b.freezeMu.Unlock()
 
-	if b.frozen.Load() != nil {
+	current := b.load()
+	if current.frozen != nil {
 		return false
 	}
-	oldActive := b.active.Swap(skiplist.NewSkipList(b.seed))
-	b.frozen.Store(oldActive)
+	b.state.Store(&layers{
+		active: skiplist.NewSkipList(b.seed),
+		frozen: current.active,
+	})
 	return true
 }
 
 // FrozenLen returns the number of unique keys in the frozen operation layer.
 func (b *Buffer) FrozenLen() int64 {
-	frozen := b.frozen.Load()
+	frozen := b.load().frozen
 	if frozen == nil {
 		return 0
 	}
@@ -143,7 +174,7 @@ func (b *Buffer) FrozenLen() int64 {
 
 // ReadFrozen returns an operation from the frozen layer without copying data.
 func (b *Buffer) ReadFrozen(key []byte) (ops.Op, bool) {
-	frozen := b.frozen.Load()
+	frozen := b.load().frozen
 	if frozen == nil {
 		return ops.Op{}, false
 	}
@@ -152,7 +183,7 @@ func (b *Buffer) ReadFrozen(key []byte) (ops.Op, bool) {
 
 // IterFrozen returns a zero-copy ordered iterator over frozen operations.
 func (b *Buffer) IterFrozen() iter.Seq2[[]byte, ops.Op] {
-	frozen := b.frozen.Load()
+	frozen := b.load().frozen
 	if frozen == nil {
 		return emptyOpsIter
 	}
@@ -164,7 +195,27 @@ func (b *Buffer) ClearFrozen() {
 	b.freezeMu.Lock()
 	defer b.freezeMu.Unlock()
 
-	b.frozen.Store(nil)
+	current := b.load()
+	if current.frozen == nil {
+		return
+	}
+	b.state.Store(&layers{active: current.active})
+}
+
+// TakeActive swaps in a fresh active list and returns the previous one.
+//
+// Callers must hold whatever exclusion keeps writers out; Buffer itself only
+// guarantees the swap is atomic with respect to readers and to Freeze.
+func (b *Buffer) TakeActive() *skiplist.SkipList {
+	b.freezeMu.Lock()
+	defer b.freezeMu.Unlock()
+
+	current := b.load()
+	b.state.Store(&layers{
+		active: skiplist.NewSkipList(b.seed),
+		frozen: current.frozen,
+	})
+	return current.active
 }
 
 func emptyOpsIter(yield func([]byte, ops.Op) bool) {
@@ -189,14 +240,19 @@ func mergeLayeredOps(lower ops.Op, hasLower bool, upper ops.Op, hasUpper bool) (
 	return merged, true
 }
 
-func (b *Buffer) activeList() *skiplist.SkipList {
-	active := b.active.Load()
-	if active != nil {
-		return active
+func (b *Buffer) load() *layers {
+	current := b.state.Load()
+	if current != nil {
+		return current
 	}
-	created := skiplist.NewSkipList(b.seed)
-	if b.active.CompareAndSwap(nil, created) {
+
+	created := &layers{active: skiplist.NewSkipList(b.seed)}
+	if b.state.CompareAndSwap(nil, created) {
 		return created
 	}
-	return b.active.Load()
+	return b.state.Load()
+}
+
+func (b *Buffer) activeList() *skiplist.SkipList {
+	return b.load().active
 }

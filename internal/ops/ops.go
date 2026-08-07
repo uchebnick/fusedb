@@ -35,6 +35,18 @@ func NewPut(value []byte) Op {
 	}
 }
 
+// NewPutOwned returns a put operation that takes ownership of value.
+//
+// It skips the defensive copy NewPut makes, so the caller must never read or
+// write value again. Use it only for freshly allocated buffers, such as the
+// output of value.EncodeBytes.
+func NewPutOwned(value []byte) Op {
+	return Op{
+		Kind: OpPut,
+		Data: value,
+	}
+}
+
 // NewDelete returns a delete tombstone operation.
 func NewDelete() Op {
 	return Op{

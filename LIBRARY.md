@@ -5,8 +5,11 @@ FuseDB can be used as an embedded key-value database in your Go applications.
 ## Installation
 
 ```bash
-go get github.com/uchebnick/fusedb/pkg/fusedb
+go get github.com/uchebnick/fusedb
 ```
+
+`pkg/fusedb` is the public API. `pkg/oneleafdb` is the engine behind it and is
+not a supported entry point.
 
 ## Quick Start
 
@@ -54,13 +57,18 @@ func main() {
 
 ```go
 db, err := fusedb.Open(fusedb.Options{
-    Dir:       "./data",           // Required: database directory
-    CacheSize: 5 << 20,            // Optional: value cache size (default: 5MB)
-    MergeSize: 5 << 20,            // Optional: merge threshold (default: 5MB)
-    WALPath:   "./data/wal.log",   // Optional: WAL file path
-    WALSyncWrites: false,          // Optional: sync writes (default: false)
-    DictionaryPath: "dict.zdict",  // Optional: compression dictionary
+    Dir:         "./data",          // Required: database directory
+    CacheSize:   5 << 20,           // Optional: value cache size (default: 5MB)
+    MergeSize:   8 << 20,           // Optional: merge threshold (default: 8MB)
+    MaxLeafSize: 64 << 20,          // Optional: leaf split size (default: 64MB)
+    WALPath:     "./data/wal.log",  // Optional: log path (default: <Dir>/wal.log)
+    WALSyncWrites:  false,          // Optional: sync writes (default: false)
+    DictionaryPath: "dict.zdict",   // Optional: compression dictionary
 })
+
+Reopening the same directory restores the database: the leaf catalog is read
+from the manifest and the tail of the log that no segment covers yet is
+replayed.
 ```
 
 ### Basic Operations
@@ -96,8 +104,11 @@ err := db.Inc([]byte("counter"), -1)
 
 ```go
 stats := db.Stats()
-log.Printf("Buffered: %d bytes", stats.BufferedBytes)
+log.Printf("Buffered: %d bytes across %d leaves", stats.BufferedBytes, stats.Leaves)
 ```
+
+`Leaves` is how many ranges the keyspace is split into. It grows as the database
+grows; each leaf owns one segment file and merges independently.
 
 ### Closing
 
@@ -119,13 +130,28 @@ fusedb.Options{
 
 ### Merge Threshold
 
-Controls when the in-memory buffer is merged to disk:
+Controls when a leaf's in-memory buffer is merged into its segment:
 
 ```go
 fusedb.Options{
     MergeSize: 10 << 20, // Merge at 10MB
 }
 ```
+
+### Leaf Size
+
+Controls when a leaf splits in two:
+
+```go
+fusedb.Options{
+    MaxLeafSize: 64 << 20, // Split at 64MB
+}
+```
+
+This is the main knob for write amplification. A merge rewrites one leaf, so the
+bytes rewritten per merge are bounded by `MaxLeafSize` rather than by the size of
+the whole database. A smaller leaf makes each merge cheaper but leaves more
+leaves to track.
 
 ### Write-Ahead Log
 
@@ -215,24 +241,36 @@ db.Inc([]byte("product:456:stock"), -1)
 
 ## Performance Characteristics
 
-- **Writes**: ~1µs (async WAL), ~300ns (in-memory only)
-- **Reads**: ~1µs (cached), ~1.3µs (from segment)
-- **Counters**: ~250ns (in-place increment)
-- **Startup**: ~200ms (64K keys)
+See [benchmarks/RESULTS.md](benchmarks/RESULTS.md) for measured numbers and the
+commands that produce them.
 
-See [benchmarks/RESULTS.md](benchmarks/RESULTS.md) for detailed benchmarks.
+A point read touches one leaf: a binary search in memory, one bloom filter, one
+block index, one block. Adding leaves does not add work to a read.
 
 ## Thread Safety
 
 All operations are thread-safe and can be called concurrently from multiple goroutines.
 
+## Durability
+
+Writes go to the write-ahead log before they are applied. With
+`WALSyncWrites: false` (the default) the log is flushed by group commit every
+200µs, so a crash can lose at most that window. With `WALSyncWrites: true` each
+write waits for its record to reach disk.
+
+A crash is recovered on the next open: the manifest names the segments, and log
+records past the recorded watermark are replayed. A partially written record at
+the end of the log is discarded, which is the expected state after a crash.
+
 ## Limitations
 
 - Single-node only (not distributed)
 - No range scans yet
-- No transactions
+- No transactions or snapshots
 - Experimental status (not production-ready)
 
 ## Examples
 
-See [example_test.go](example_test.go) for more examples.
+See [pkg/fusedb/example_test.go](pkg/fusedb/example_test.go) for more examples,
+and [pkg/fusedb/durability_test.go](pkg/fusedb/durability_test.go) for the
+restart and crash behaviour that is actually tested.

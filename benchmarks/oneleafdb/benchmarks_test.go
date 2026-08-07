@@ -11,9 +11,7 @@ import (
 	"time"
 
 	"github.com/uchebnick/fusedb/internal/compression"
-	"github.com/uchebnick/fusedb/internal/disk"
 	onedb "github.com/uchebnick/fusedb/pkg/oneleafdb"
-	"github.com/uchebnick/fusedb/internal/segment"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/dgraph-io/badger/v4"
@@ -444,28 +442,25 @@ func BenchmarkPebbleGet64KNoBlockCache(b *testing.B) {
 }
 
 func BenchmarkOneLeafOpenGet64K(b *testing.B) {
-	db := newSeededOneLeafDB(b, benchSeedKeys)
-	path := db.SegmentPath()
-	version := uint64(1)
-	_ = db.Close()
+	// Cold start measured honestly: the database is seeded, closed, and then
+	// reopened from its own directory, so the timed work is the real open path
+	// (manifest load plus segment open) rather than a reader handed in from the
+	// outside.
+	dir := b.TempDir()
+	seedOneLeafDBAt(b, dir, benchSeedKeys)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		opened, err := onedb.OpenDB(onedb.DBOptions{
-			Dir:            b.TempDir(),
+			Dir:            dir,
 			ThresholdBytes: benchThreshold,
 			CacheBytes:     benchCacheBytes,
+			DisableWAL:     true,
 		})
 		if err != nil {
 			b.Fatalf("open oneleaf: %v", err)
 		}
-		segmentReader, err := openSegmentReader(path)
-		if err != nil {
-			_ = opened.Close()
-			b.Fatalf("open segment reader: %v", err)
-		}
-		opened.InstallReaderForBench(segmentReader, version)
 
 		value, ok, err := opened.Get(onedb.DBKey(i % benchSeedKeys))
 		if err != nil || !ok {
@@ -474,6 +469,31 @@ func BenchmarkOneLeafOpenGet64K(b *testing.B) {
 		}
 		oneLeafBenchSink = value
 		_ = opened.Close()
+	}
+}
+
+// seedOneLeafDBAt fills a directory with a merged database and closes it.
+func seedOneLeafDBAt(b *testing.B, dir string, keys int) {
+	b.Helper()
+
+	db, err := onedb.OpenDB(onedb.DBOptions{
+		Dir:            dir,
+		ThresholdBytes: benchThreshold,
+		CacheBytes:     benchCacheBytes,
+		DisableWAL:     true,
+	})
+	if err != nil {
+		b.Fatalf("open oneleaf: %v", err)
+	}
+
+	value := make([]byte, benchValueSize)
+	for i := 0; i < keys; i++ {
+		if err := db.Put(onedb.DBKey(i), value); err != nil {
+			b.Fatalf("put seed %d: %v", i, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		b.Fatalf("close seeded oneleaf: %v", err)
 	}
 }
 
@@ -584,6 +604,7 @@ func newOneLeafDBForBench(b *testing.B, compressed, walEnabled bool) *onedb.DB {
 		ThresholdBytes: benchThreshold,
 		Dictionary:     dict,
 		WALPath:        walPath,
+		DisableWAL:     !walEnabled,
 		CacheBytes:     benchCacheBytes,
 	})
 	if err != nil {
@@ -663,10 +684,6 @@ func openSeededPebbleDBAtWithCache(b *testing.B, dir string, keys int, cacheSize
 		b.Fatalf("flush pebble: %v", err)
 	}
 	return db
-}
-
-func openSegmentReader(path string) (*segment.Reader, error) {
-	return segment.OpenReader(disk.DefaultFS, path, nil)
 }
 
 func measureLatency(n int, fn func(int) error) []time.Duration {

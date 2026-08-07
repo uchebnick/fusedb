@@ -21,36 +21,24 @@ func BenchmarkScalability(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(size.name, func(b *testing.B) {
-			db, err := OpenDB(DBOptions{
+			opts := DBOptions{
 				Dir:            b.TempDir(),
 				ThresholdBytes: 10 << 20, // 10MB threshold
 				CacheBytes:     size.cacheSize,
-			})
-			if err != nil {
-				b.Fatalf("open db: %v", err)
+				// Reads are what is being measured; the log would only double
+				// the cost of seeding.
+				DisableWAL: true,
 			}
-			defer db.Close()
 
 			b.Logf("Inserting %d keys...", size.numKeys)
-			value := make([]byte, 128) // 128 bytes like YCSB
-			for i := 0; i < size.numKeys; i++ {
-				key := DBKey(i)
-				for j := range value {
-					value[j] = byte(i % 256)
-				}
-				if err := db.Put(key, value); err != nil {
-					b.Fatalf("put key %d: %v", i, err)
-				}
-			}
+			seedClosedDB(b, opts, size.numKeys, 128) // 128 bytes like YCSB
 
-			// Force merge to disk
-			if err := db.Merge(); err != nil {
-				b.Fatalf("merge: %v", err)
-			}
-
-			segmentPath := db.SegmentPath()
-			b.Logf("Merged to: %s", segmentPath)
-			b.Logf("Buffered bytes: %d", db.BufferedBytes())
+			// Reads run against a reopened database, so every value comes from a
+			// segment and the value cache starts empty. That is the point of the
+			// benchmark: how lookup cost moves as the dataset, and with it the
+			// number of leaves, grows.
+			db := reopenSeeded(b, opts)
+			b.Logf("Leaves: %d, buffered bytes: %d", db.LeafCount(), db.BufferedBytes())
 
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -110,8 +98,10 @@ func BenchmarkWriteScalability(b *testing.B) {
 			}
 
 			b.StopTimer()
-			mergeCount := int(db.version)
-			b.Logf("Triggered %d merges", mergeCount)
+			// There is no merge counter to report any more: merges happen per
+			// leaf, so the shape of the tree and what is still unmerged say more
+			// about the write path than a single count would.
+			b.Logf("Leaves: %d, unmerged bytes: %d", db.LeafCount(), db.BufferedBytes())
 		})
 	}
 }
