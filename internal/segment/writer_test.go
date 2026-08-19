@@ -128,6 +128,35 @@ func TestSegmentFreezeRaw(t *testing.T) {
 	}
 }
 
+func TestSegmentRawBlockObserverIsBoundedFromStorageCorrectness(t *testing.T) {
+	for _, panicObserver := range []bool{false, true} {
+		fs := disk.NewMemFS()
+		var observed [][]byte
+		created, err := NewSegment(Options{
+			FS: fs, Dir: "observed", SegmentID: 100 + uint64(len(observed)), Version: 1,
+			TargetBlockSize: 64, Compression: CompressionNone,
+			ObserveRawBlock: func(raw []byte) {
+				if panicObserver {
+					panic("observer failure")
+				}
+				observed = append(observed, bytes.Clone(raw))
+			},
+		})
+		if err != nil {
+			t.Fatalf("new segment: %v", err)
+		}
+		if err := created.Append(BlockEntry{Key: []byte("key"), Value: bytes.Repeat([]byte("value"), 20)}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if err := created.Freeze(); err != nil {
+			t.Fatalf("freeze with panic=%v: %v", panicObserver, err)
+		}
+		if !panicObserver && len(observed) == 0 {
+			t.Fatal("raw observer received no blocks")
+		}
+	}
+}
+
 func TestSegmentFreezeCompressed(t *testing.T) {
 	dict := mustTestDictionary(t, 17, [][]byte{
 		[]byte("tenant=a|region=eu|state=active|count=1"),

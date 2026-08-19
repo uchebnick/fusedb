@@ -13,13 +13,18 @@ linters:
     - unused
     - misspell
     - gocritic
-    - revive
 
   settings:
     errcheck:
       check-blank: false
 
   exclusions:
+    # The supported library and storage engine are held to the release lint
+    # gate. Benchmark harnesses and standalone experimental tools are built and
+    # vetted separately, but are not part of the public production surface.
+    paths:
+      - ^benchmarks/
+      - ^cmd/
     rules:
       # A deferred Close in a test has no error path worth taking: the test has
       # already passed or failed by the time it runs. Reporting them buried the

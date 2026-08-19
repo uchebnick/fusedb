@@ -209,8 +209,8 @@ benchmarks/docker/
    - `internal/oneleafdb/cache.go` - unsafe.String()
 
 4. ✅ **Fixed benchmark overhead** - 1% sampling вместо per-op ReadMemStats()
-   - `cmd/benchmark-runner-metrics/main.go`
-   - `cmd/pebble-runner-metrics/main.go`
+   - `benchmarks/cmd/benchmark-runner-metrics/main.go`
+   - `benchmarks/cmd/pebble-runner-metrics/main.go`
 
 5. ✅ **Detailed Grafana dashboard** - автоматическая провизия
    - Latency p50, p95, p99

@@ -6,9 +6,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/limits"
 )
 
 const (
@@ -57,27 +60,40 @@ func SegmentTempFileName(dir string, segmentID, version uint64) string {
 	return SegmentFileName(dir, segmentID, version) + segmentTmpExt
 }
 
-func writeAll(w io.Writer, data []byte) error {
-	for len(data) > 0 {
-		n, err := w.Write(data)
-		if err != nil {
-			return err
-		}
-		data = data[n:]
+// ParseSegmentFileName recognizes only canonical finalized or temporary
+// segment basenames. Strict reconstruction prevents startup cleanup from ever
+// treating an unrelated user file as an engine-owned segment.
+func ParseSegmentFileName(name string) (segmentID, version uint64, temporary, ok bool) {
+	base := filepath.Base(name)
+	finalBase := base
+	if strings.HasSuffix(finalBase, segmentTmpExt) {
+		temporary = true
+		finalBase = strings.TrimSuffix(finalBase, segmentTmpExt)
 	}
-	return nil
-}
-
-func writeAllAt(w io.WriterAt, off int64, data []byte) error {
-	for len(data) > 0 {
-		n, err := w.WriteAt(data, off)
-		if err != nil {
-			return err
-		}
-		data = data[n:]
-		off += int64(n)
+	if !strings.HasPrefix(finalBase, "segment-") || !strings.HasSuffix(finalBase, segmentFileExt) {
+		return 0, 0, false, false
 	}
-	return nil
+	identity := strings.TrimSuffix(strings.TrimPrefix(finalBase, "segment-"), segmentFileExt)
+	parts := strings.Split(identity, "-v")
+	if len(parts) != 2 {
+		return 0, 0, false, false
+	}
+	segmentID, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil || segmentID == 0 {
+		return 0, 0, false, false
+	}
+	version, err = strconv.ParseUint(parts[1], 10, 64)
+	if err != nil || version == 0 {
+		return 0, 0, false, false
+	}
+	want := filepath.Base(SegmentFileName("", segmentID, version))
+	if temporary {
+		want += segmentTmpExt
+	}
+	if base != want {
+		return 0, 0, false, false
+	}
+	return segmentID, version, temporary, true
 }
 
 // OpenSegment loads one frozen segment from a finalized file.
@@ -127,6 +143,9 @@ func OpenSegment(fs disk.FS, path string) (*Segment, error) {
 	}
 	if err := validateSegmentLayout(uint64(fileSize), footer); err != nil {
 		return nil, err
+	}
+	if footer.Index.Length > limits.MaxSegmentMetadataBytes || footer.Bloom.Length > limits.MaxSegmentMetadataBytes {
+		return nil, ErrSegmentSectionTooBig
 	}
 
 	indexPB, err := readSectionFrom(f, footer.Index)
@@ -204,7 +223,10 @@ func (s *Segment) readBlockPayload(entry BlockIndexEntry) ([]byte, error) {
 }
 
 func (s *Segment) blockSection(entry BlockIndexEntry) (Section, error) {
-	if uint64(entry.Offset)+uint64(entry.Length) > s.Footer.Data.Length {
+	if uint64(entry.Length) > limits.MaxEncodedBlockBytes {
+		return Section{}, ErrSegmentSectionTooBig
+	}
+	if entry.Offset > s.Footer.Data.Length || uint64(entry.Length) > s.Footer.Data.Length-entry.Offset {
 		return Section{}, ErrBlockOutsideData
 	}
 	return Section{

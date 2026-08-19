@@ -3,10 +3,14 @@ package segment
 import (
 	"bytes"
 	"errors"
+
+	"github.com/uchebnick/fusedb/internal/limits"
 )
 
 var (
 	ErrEmptyBlockKey        = errors.New("segment: empty block key")
+	ErrBlockKeyTooLarge     = errors.New("segment: block key too large")
+	ErrBlockValueTooLarge   = errors.New("segment: block value too large")
 	ErrUnsortedBlockEntries = errors.New("segment: block entries out of order")
 )
 
@@ -90,6 +94,12 @@ func (b *Block) Add(entry BlockEntry) error {
 func (b *Block) AddUnsafe(entry BlockEntry) error {
 	if len(entry.Key) == 0 {
 		return ErrEmptyBlockKey
+	}
+	if len(entry.Key) > limits.MaxKeyBytes {
+		return ErrBlockKeyTooLarge
+	}
+	if len(entry.Value) > limits.MaxEncodedValueBytes {
+		return ErrBlockValueTooLarge
 	}
 	if n := len(b.entries); n > 0 {
 		prev := b.entries[n-1]

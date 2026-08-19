@@ -1,4 +1,4 @@
-// Simple example of using FuseDB as a library
+// Command example demonstrates the supported FuseDB library API.
 package main
 
 import (
@@ -9,74 +9,71 @@ import (
 )
 
 func main() {
-	// Open database
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() (err error) {
 	db, err := fusedb.Open(fusedb.Options{
 		Dir:       "./example-data",
-		CacheSize: 5 << 20, // 5MB
-		MergeSize: 5 << 20, // 5MB
+		CacheSize: 5 << 20,
+		MergeSize: 5 << 20,
 	})
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("open database: %w", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() {
+		if closeErr := db.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("close database: %w", closeErr)
+		}
+	}()
 
-	fmt.Println("FuseDB Example")
-	fmt.Println("==============")
+	fmt.Println("FuseDB example")
 
-	// Put some values
-	fmt.Println("\n1. Storing values...")
-	if err := db.Put([]byte("user:1:name"), []byte("Alice")); err != nil {
-		log.Fatal(err)
-	}
-	if err := db.Put([]byte("user:2:name"), []byte("Bob")); err != nil {
-		log.Fatal(err)
-	}
-	if err := db.Put([]byte("user:3:name"), []byte("Charlie")); err != nil {
-		log.Fatal(err)
+	users := []string{"Alice", "Bob", "Charlie"}
+	for i, name := range users {
+		key := []byte(fmt.Sprintf("user:%d:name", i+1))
+		if err := db.Put(key, []byte(name)); err != nil {
+			return fmt.Errorf("put %q: %w", key, err)
+		}
 	}
 
-	// Get values
-	fmt.Println("\n2. Reading values...")
-	for i := 1; i <= 3; i++ {
+	for i := 1; i <= len(users); i++ {
 		key := []byte(fmt.Sprintf("user:%d:name", i))
 		value, found, err := db.Get(key)
 		if err != nil {
-			log.Fatal(err)
+			return fmt.Errorf("get %q: %w", key, err)
 		}
 		if found {
-			fmt.Printf("   %s = %s\n", key, value)
+			fmt.Printf("%s = %s\n", key, value)
 		}
 	}
 
-	// Increment counters
-	fmt.Println("\n3. Using counters...")
 	if err := db.Inc([]byte("page:home:views"), 10); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("increment views: %w", err)
 	}
 	if err := db.Inc([]byte("page:home:views"), 5); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("increment views: %w", err)
 	}
-	if err := db.Inc([]byte("page:about:views"), 3); err != nil {
-		log.Fatal(err)
+	views, found, err := db.GetInt64([]byte("page:home:views"))
+	if err != nil {
+		return fmt.Errorf("get views: %w", err)
+	}
+	if found {
+		fmt.Printf("page:home:views = %d\n", views)
 	}
 
-	// Delete a key
-	fmt.Println("\n4. Deleting a key...")
 	if err := db.Delete([]byte("user:2:name")); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("delete user:2:name: %w", err)
 	}
-
-	value, found, _ := db.Get([]byte("user:2:name"))
-	if !found {
-		fmt.Println("   user:2:name deleted successfully")
-	} else {
-		fmt.Printf("   ERROR: key still exists with value: %s\n", value)
+	_, found, err = db.Get([]byte("user:2:name"))
+	if err != nil {
+		return fmt.Errorf("verify delete: %w", err)
 	}
+	fmt.Printf("user:2:name found = %v\n", found)
 
-	// Show stats
-	fmt.Println("\n5. Database stats...")
 	stats := db.Stats()
-	fmt.Printf("   Buffered: %d bytes\n", stats.BufferedBytes)
-
-	fmt.Println("\nDone!")
+	fmt.Printf("buffered bytes = %d, leaves = %d\n", stats.BufferedBytes, stats.Leaves)
+	return nil
 }

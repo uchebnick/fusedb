@@ -166,35 +166,35 @@ func (l *Leaf) Reader() *segment.Reader {
 
 // Get returns the materialized user value for key.
 func (l *Leaf) Get(key []byte) ([]byte, bool, error) {
+	encoded, ok, err := l.GetEncoded(key)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	return decodeUserValue(encoded)
+}
+
+// GetEncoded returns the materialized value including its internal kind tag.
+// The returned slice borrows leaf-owned memory. It is used by the DB mutation
+// admission path to reject an Inc over a byte value before writing that
+// operation to the WAL.
+func (l *Leaf) GetEncoded(key []byte) ([]byte, bool, error) {
 	if l == nil {
 		return nil, false, nil
 	}
 
 	if op, ok := l.buffer.ReadOp(key); ok {
 		if op.Kind != ops.OpInc {
-			encoded, ok, err := l.resolveOp(nil, op)
-			if err != nil || !ok {
-				return nil, ok, err
-			}
-			return decodeUserValue(encoded)
+			return l.resolveOp(nil, op)
 		}
 
 		segmentValue, segmentOK, err := l.readSegmentValue(key)
 		if err != nil {
 			return nil, false, err
 		}
-		encoded, ok, err := l.resolveOp(optionalValue(segmentValue, segmentOK), op)
-		if err != nil || !ok {
-			return nil, ok, err
-		}
-		return decodeUserValue(encoded)
+		return l.resolveOp(optionalValue(segmentValue, segmentOK), op)
 	}
 
-	segmentValue, ok, err := l.readSegmentValue(key)
-	if err != nil || !ok {
-		return nil, ok, err
-	}
-	return decodeUserValue(segmentValue)
+	return l.readSegmentValue(key)
 }
 
 func (l *Leaf) readSegmentValue(key []byte) ([]byte, bool, error) {
@@ -282,7 +282,7 @@ func (l *Leaf) Merge(opts segment.Options) error {
 	// A false result means a previous merge failed after freezing. Continuing
 	// with that frozen layer is required for progress: bailing out here would
 	// make every later merge a silent no-op and strand the buffered writes.
-	l.buffer.Freeze()
+	l.FreezeBuffer()
 
 	segmentIter := emptySegmentIter
 	segmentErr := func() error { return nil }

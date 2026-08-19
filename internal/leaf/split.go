@@ -59,7 +59,10 @@ func (l *Leaf) MergeSplit(opts SplitOptions) ([]MergeResult, error) {
 
 	// A false result means an earlier merge failed after freezing. Reusing that
 	// frozen layer is required for progress.
-	l.buffer.Freeze()
+	// FreezeBuffer excludes writers around the active/frozen swap. Calling the
+	// buffer primitive directly lets a writer retain the old active list and
+	// publish into it after the merge iterator has passed that key.
+	l.FreezeBuffer()
 
 	segmentIter := emptySegmentIter
 	segmentErr := func() error { return nil }

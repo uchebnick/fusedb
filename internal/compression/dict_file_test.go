@@ -2,10 +2,24 @@ package compression
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"testing"
 
 	"github.com/uchebnick/fusedb/internal/disk"
 )
+
+func TestDictionaryDecoderRejectsOversizedLengthBeforePayload(t *testing.T) {
+	data := make([]byte, dictionaryHeaderSize)
+	copy(data[:4], dictionaryFileMagic)
+	binary.LittleEndian.PutUint32(data[4:8], dictionaryFileVersion)
+	binary.LittleEndian.PutUint32(data[8:12], 1)
+	binary.LittleEndian.PutUint32(data[12:16], 1)
+	binary.LittleEndian.PutUint32(data[16:20], MaxDictionarySize+1)
+	if _, err := DecodeDictionary(data); !errors.Is(err, ErrDictionaryTooLarge) {
+		t.Fatalf("DecodeDictionary error = %v, want ErrDictionaryTooLarge", err)
+	}
+}
 
 func TestDictionaryRoundTrip(t *testing.T) {
 	raw, err := TrainDictionary(TrainOptions{
@@ -62,4 +76,18 @@ func TestDictionaryRoundTrip(t *testing.T) {
 		t.Fatalf("decoded payload = %q, want %q", dpb.Data, payload)
 	}
 	dpb.Release()
+}
+
+func FuzzDecodeDictionaryNeverPanics(f *testing.F) {
+	f.Add([]byte{})
+	f.Add(make([]byte, dictionaryHeaderSize))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 1<<20 {
+			t.Skip()
+		}
+		dict, _ := DecodeDictionary(data)
+		if dict != nil {
+			_ = dict.Close()
+		}
+	})
 }

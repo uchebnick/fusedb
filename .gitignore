@@ -37,3 +37,6 @@ go.work.sum
 
 # Example data
 example-data/
+
+# Generated release artifacts
+dist/

@@ -9,6 +9,7 @@ import (
 	"io"
 
 	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/limits"
 )
 
 const readerBufferSize = 64 << 10
@@ -202,6 +203,9 @@ func (c *Cursor) readRecord() (Record, int64, error) {
 	}
 
 	headerLen := int64(len(c.scratch))
+	if keyLen > limits.MaxKeyBytes || payloadLen > limits.MaxWALPayloadBytes {
+		return Record{}, 0, fmt.Errorf("%w: oversized record at offset %d", ErrCorruptRecord, c.offset)
+	}
 	if keyLen > uint64(remaining) || payloadLen > uint64(remaining) {
 		return Record{}, 0, errTornTail
 	}

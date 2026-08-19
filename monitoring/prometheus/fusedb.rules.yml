@@ -1,0 +1,118 @@
+groups:
+  - name: fusedb-recording
+    interval: 30s
+    rules:
+      - record: fusedb:operation_p95_seconds:rate5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (job, instance, database, operation, le) (
+              rate(fusedb_operation_duration_seconds_bucket[5m])
+            )
+          )
+      - record: fusedb:operation_p99_seconds:rate5m
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (job, instance, database, operation, le) (
+              rate(fusedb_operation_duration_seconds_bucket[5m])
+            )
+          )
+      - record: fusedb:operation_rate:rate5m
+        expr: |
+          sum by (job, instance, database, operation) (
+            rate(fusedb_operations_total[5m])
+          )
+
+  - name: fusedb-alerts
+    interval: 30s
+    rules:
+      - alert: FuseDBNotReady
+        expr: fusedb_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: FuseDB handle is not ready
+          description: Close and reopen the fenced handle; do not keep sending foreground traffic.
+
+      - alert: FuseDBTerminalError
+        expr: fusedb_terminal_error == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: FuseDB encountered a terminal storage error
+          description: Stop traffic to this handle and reopen before retrying mutations.
+
+      - alert: FuseDBCommitOutcomeUncertain
+        expr: increase(fusedb_commit_uncertain_errors_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: FuseDB commit outcome requires reconciliation
+          description: Reopen and inspect affected values before retrying non-idempotent mutations.
+
+      - alert: FuseDBBackgroundJobFailures
+        expr: increase(fusedb_background_jobs_total{outcome="failed"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: FuseDB background work failed
+          description: Inspect the failing job kind and storage errors; terminal failures also fence the handle.
+
+      - alert: FuseDBSchedulerOverloaded
+        expr: fusedb_scheduler_state{state="overloaded"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: FuseDB scheduler remains overloaded
+          description: Foreground latency or request rate is persistently above the learned safe operating envelope.
+
+      - alert: FuseDBReadP99High
+        expr: fusedb:operation_p99_seconds:rate5m{operation="read"} > 0.050
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: FuseDB read p99 exceeds 50 ms
+          description: Tune this threshold to the application SLO and inspect scheduler state, debt, and resource headroom.
+
+      - alert: FuseDBWriteP99High
+        expr: fusedb:operation_p99_seconds:rate5m{operation="write"} > 0.100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: FuseDB write p99 exceeds 100 ms
+          description: Tune this threshold to the application SLO and inspect WAL sync latency and resource saturation.
+
+      - alert: FuseDBMergeDebtStalled
+        expr: fusedb_pending_merge_leaves > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: FuseDB merge debt is not clearing
+          description: The scheduler may lack a stable low-load window or sufficient CPU, disk, or memory headroom.
+
+      - alert: FuseDBWALCheckpointDebtHigh
+        expr: fusedb_wal_checkpoint_debt_bytes > 134217728
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: FuseDB WAL checkpoint debt exceeds 128 MiB
+          description: The example threshold is twice the default checkpoint trigger; align it with the deployed configuration.
+
+      - alert: FuseDBResourceSaturated
+        expr: fusedb_resource_utilization_ratio > 0.95
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: FuseDB reached its scheduler resource ceiling
+          description: Reserve host headroom or adjust the explicit CPU, disk, and memory budget after workload qualification.

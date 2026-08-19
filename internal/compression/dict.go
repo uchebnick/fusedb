@@ -1,30 +1,5 @@
 package compression
 
-/*
-#cgo darwin CFLAGS: -I/opt/homebrew/include
-#cgo darwin LDFLAGS: -L/opt/homebrew/lib -llz4
-#cgo linux LDFLAGS: -llz4
-#include <stdlib.h>
-#include <lz4.h>
-
-static int fusedb_lz4_compress_dict(
-	char* src, int srcSize,
-	char* dst, int dstCap,
-	char* dict, int dictSize,
-	int acceleration
-) {
-	LZ4_stream_t* stream = LZ4_createStream();
-	if (stream == NULL) {
-		return 0;
-	}
-	LZ4_loadDict(stream, dict, dictSize);
-	int n = LZ4_compress_fast_continue(stream, src, dst, srcSize, dstCap, acceleration);
-	LZ4_freeStream(stream);
-	return n;
-}
-*/
-import "C"
-
 import (
 	"bytes"
 	"container/list"
@@ -33,17 +8,19 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/limits"
 
 	dictbuilder "github.com/klauspost/compress/dict"
 )
 
 const (
 	MinDictionarySize      = 8
+	MaxDictionarySize      = limits.MaxDictionaryBytes
 	DefaultDictionarySize  = 4 << 10
 	DefaultLZ4Acceleration = 1
+	MaxLZ4Acceleration     = 65537
 	lz4BlockHeaderSize     = 4
 	maxDecompressBlockSize = 5 << 10
 )
@@ -73,6 +50,8 @@ func (pb *PooledDecompressBuffer) Release() {
 var (
 	ErrNilDictionary        = errors.New("compression: nil dictionary")
 	ErrEmptyDictionary      = errors.New("compression: empty dictionary")
+	ErrDictionaryTooLarge   = errors.New("compression: dictionary exceeds LZ4 window")
+	ErrInvalidAcceleration  = errors.New("compression: invalid LZ4 acceleration")
 	ErrZeroDictionaryID     = errors.New("compression: dictionary id must be non-zero")
 	ErrNoSamples            = errors.New("compression: no samples provided")
 	ErrBuildDictionaryPanic = errors.New("compression: dictionary build panic")
@@ -83,6 +62,7 @@ var (
 	ErrNilDictionaryFS      = errors.New("compression: nil dictionary filesystem")
 	ErrDictionaryStorage    = errors.New("compression: dictionary registry has no storage")
 	ErrDictionaryIDMismatch = errors.New("compression: dictionary id mismatch")
+	ErrCGODisabled          = errors.New("compression: LZ4 dictionary codec requires CGO")
 )
 
 // Dictionary is immutable runtime wrapper around one LZ4 raw dictionary.
@@ -129,14 +109,23 @@ func NewDictionary(id uint32, raw []byte) (*Dictionary, error) {
 
 // NewDictionaryLevel builds reusable LZ4 dictionary codec with explicit acceleration.
 func NewDictionaryLevel(id uint32, raw []byte, acceleration int) (*Dictionary, error) {
+	if !lz4Available() {
+		return nil, ErrCGODisabled
+	}
 	if id == 0 {
 		return nil, ErrZeroDictionaryID
 	}
 	if len(raw) == 0 {
 		return nil, ErrEmptyDictionary
 	}
+	if len(raw) > MaxDictionarySize {
+		return nil, fmt.Errorf("%w: %d > %d", ErrDictionaryTooLarge, len(raw), MaxDictionarySize)
+	}
 	if acceleration == 0 {
 		acceleration = DefaultLZ4Acceleration
+	}
+	if acceleration < 1 || acceleration > MaxLZ4Acceleration {
+		return nil, fmt.Errorf("%w: %d", ErrInvalidAcceleration, acceleration)
 	}
 
 	return &Dictionary{
@@ -156,6 +145,9 @@ func TrainDictionary(opts TrainOptions) (raw []byte, err error) {
 	}
 	if opts.Size < MinDictionarySize {
 		return nil, fmt.Errorf("compression: dictionary size %d < %d", opts.Size, MinDictionarySize)
+	}
+	if opts.Size > MaxDictionarySize {
+		return nil, fmt.Errorf("%w: %d > %d", ErrDictionaryTooLarge, opts.Size, MaxDictionarySize)
 	}
 
 	samples := normalizeSamples(opts.Samples)
@@ -206,7 +198,7 @@ func (d *Dictionary) Raw() []byte {
 	if d == nil {
 		return nil
 	}
-	return d.raw
+	return bytes.Clone(d.raw)
 }
 
 // Compress encodes one independent block with dictionary.
@@ -224,6 +216,9 @@ func (d *Dictionary) CompressInto(dst, src []byte) ([]byte, error) {
 	if d.closed.Load() {
 		return nil, ErrDictionaryClosed
 	}
+	if len(src) > limits.MaxEncodedBlockBytes {
+		return nil, ErrCorruptBlock
+	}
 	if len(src) == 0 {
 		if cap(dst) < lz4BlockHeaderSize {
 			dst = make([]byte, lz4BlockHeaderSize)
@@ -234,7 +229,7 @@ func (d *Dictionary) CompressInto(dst, src []byte) ([]byte, error) {
 		return dst, nil
 	}
 
-	bound := int(C.LZ4_compressBound(C.int(len(src))))
+	bound := lz4CompressBound(len(src))
 	need := lz4BlockHeaderSize + bound
 	if cap(dst) < need {
 		dst = make([]byte, need)
@@ -243,15 +238,7 @@ func (d *Dictionary) CompressInto(dst, src []byte) ([]byte, error) {
 	}
 	binary.LittleEndian.PutUint32(dst[:4], uint32(len(src)))
 
-	n := C.fusedb_lz4_compress_dict(
-		cBytes(src),
-		C.int(len(src)),
-		cBytes(dst[lz4BlockHeaderSize:]),
-		C.int(bound),
-		cBytes(d.raw),
-		C.int(len(d.raw)),
-		C.int(d.acceleration),
-	)
+	n := lz4CompressWithDict(dst[lz4BlockHeaderSize:], src, d.raw, d.acceleration)
 	if n <= 0 {
 		return nil, fmt.Errorf("compression: encode lz4 block failed")
 	}
@@ -269,7 +256,11 @@ func (d *Dictionary) Decompress(src []byte) (*PooledDecompressBuffer, error) {
 	if len(src) < lz4BlockHeaderSize {
 		return nil, ErrCorruptBlock
 	}
-	rawLen := int(binary.LittleEndian.Uint32(src[:4]))
+	rawLen64 := uint64(binary.LittleEndian.Uint32(src[:4]))
+	if rawLen64 > limits.MaxEncodedBlockBytes {
+		return nil, ErrCorruptBlock
+	}
+	rawLen := int(rawLen64)
 	if rawLen == 0 {
 		return &PooledDecompressBuffer{Data: []byte{}}, nil
 	}
@@ -285,17 +276,10 @@ func (d *Dictionary) Decompress(src []byte) (*PooledDecompressBuffer, error) {
 		decompressBuf = make([]byte, rawLen)
 	}
 
-	n := C.LZ4_decompress_safe_usingDict(
-		cBytes(src[lz4BlockHeaderSize:]),
-		cBytes(decompressBuf),
-		C.int(len(src)-lz4BlockHeaderSize),
-		C.int(rawLen),
-		cBytes(d.raw),
-		C.int(len(d.raw)),
-	)
-	if n != C.int(rawLen) {
+	n := lz4DecompressWithDict(decompressBuf, src[lz4BlockHeaderSize:], d.raw)
+	if n != rawLen {
 		decompressBufPool.Put(poolBufPtr)
-		return nil, fmt.Errorf("%w: decoded %d, want %d", ErrCorruptBlock, int(n), rawLen)
+		return nil, fmt.Errorf("%w: decoded %d, want %d", ErrCorruptBlock, n, rawLen)
 	}
 
 	return &PooledDecompressBuffer{
@@ -317,7 +301,11 @@ func (d *Dictionary) DecompressInto(dst, src []byte) ([]byte, error) {
 	if len(src) < lz4BlockHeaderSize {
 		return nil, ErrCorruptBlock
 	}
-	rawLen := int(binary.LittleEndian.Uint32(src[:4]))
+	rawLen64 := uint64(binary.LittleEndian.Uint32(src[:4]))
+	if rawLen64 > limits.MaxEncodedBlockBytes {
+		return nil, ErrCorruptBlock
+	}
+	rawLen := int(rawLen64)
 	if rawLen == 0 {
 		return dst[:0], nil
 	}
@@ -337,16 +325,9 @@ func (d *Dictionary) DecompressInto(dst, src []byte) ([]byte, error) {
 		decompressBuf = dst[:rawLen]
 	}
 
-	n := C.LZ4_decompress_safe_usingDict(
-		cBytes(src[lz4BlockHeaderSize:]),
-		cBytes(decompressBuf),
-		C.int(len(src)-lz4BlockHeaderSize),
-		C.int(rawLen),
-		cBytes(d.raw),
-		C.int(len(d.raw)),
-	)
-	if n != C.int(rawLen) {
-		return nil, fmt.Errorf("%w: decoded %d, want %d", ErrCorruptBlock, int(n), rawLen)
+	n := lz4DecompressWithDict(decompressBuf, src[lz4BlockHeaderSize:], d.raw)
+	if n != rawLen {
+		return nil, fmt.Errorf("%w: decoded %d, want %d", ErrCorruptBlock, n, rawLen)
 	}
 
 	if poolBufPtr != nil {
@@ -367,13 +348,6 @@ func (d *Dictionary) Close() error {
 
 	d.closed.Store(true)
 	return nil
-}
-
-func cBytes(b []byte) *C.char {
-	if len(b) == 0 {
-		return nil
-	}
-	return (*C.char)(unsafe.Pointer(&b[0]))
 }
 
 // NewRegistry creates empty dictionary registry.

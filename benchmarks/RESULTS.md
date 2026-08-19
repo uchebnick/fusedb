@@ -16,7 +16,7 @@ are kept for reference only; the sections are marked where they begin.
 | Date | `2026-08-04` (throughput), `2026-05-11` (latency, ycsb, compression) |
 | Machine | `Apple M4` |
 | OS/Arch | `darwin/arm64` |
-| Package | `fusedb/benchmarks/oneleafdb` |
+| Module/package | `github.com/uchebnick/fusedb/benchmarks/oneleafdb` |
 | Value size | `128 B` |
 | Seeded read keys | `64K` |
 | OneLeaf cache | `5 MB` value cache |
@@ -28,36 +28,36 @@ are kept for reference only; the sections are marked where they begin.
 ## Commands
 
 ```bash
-GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb -run '^$' \
+(cd benchmarks && GOCACHE=$PWD/.gocache go test ./oneleafdb -run '^$' \
   -bench 'OneLeafPutAutoMerge5MB$|OneLeafIncAutoMerge5MB$|OneLeafGet64K$|OneLeafMixedPutGet5MB$|OneLeafOpenGet64K$|PebblePutNoSync$|PebbleGet64K$|PebbleOpenGet64KNoBlockCache$' \
-  -benchmem -benchtime=1s -count=3
+  -benchmem -benchtime=1s -count=3)
 ```
 
 ```bash
-GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
-  -run TestWriteAmplification -v -count=1
+(cd benchmarks && GOCACHE=$PWD/.gocache go test ./oneleafdb \
+  -run TestWriteAmplification -v -count=1)
 ```
 
 ```bash
-GOCACHE=$PWD/.gocache FUSEDB_LATENCY_PROBE=1 go test ./benchmarks/oneleafdb \
+(cd benchmarks && GOCACHE=$PWD/.gocache FUSEDB_LATENCY_PROBE=1 go test ./oneleafdb \
   -run 'TestOneLeafPebble(WriteLatency10MB|ReadLatency64K|RateLimiterLatency10MB)' \
-  -count=1 -v
+  -count=1 -v)
 ```
 
 ```bash
-GOCACHE=$PWD/.gocache FUSEDB_REAL_YCSB=1 go test ./benchmarks/oneleafdb \
-  -run TestGoYCSBCoreLatency -count=1 -v
+(cd benchmarks && GOCACHE=$PWD/.gocache FUSEDB_REAL_YCSB=1 go test ./oneleafdb \
+  -run TestGoYCSBCoreLatency -count=1 -v)
 ```
 
 ```bash
-GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
-  -run TestCompression4KProbeRatio -count=1 -v
+(cd benchmarks && GOCACHE=$PWD/.gocache go test ./oneleafdb \
+  -run TestCompression4KProbeRatio -count=1 -v)
 ```
 
 ```bash
-GOCACHE=$PWD/.gocache go test ./benchmarks/oneleafdb \
+(cd benchmarks && GOCACHE=$PWD/.gocache go test ./oneleafdb \
   -run '^$' -bench 'BenchmarkCompression4K(Compress|Decompress)' \
-  -benchmem -benchtime=2s -count=5
+  -benchmem -benchtime=2s -count=5)
 ```
 
 ## Throughput (`2026-08-04`, leaf tree)

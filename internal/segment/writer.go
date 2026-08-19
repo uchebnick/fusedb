@@ -43,6 +43,9 @@ type Options struct {
 	BloomFalsePositive    float64
 	Compression           CompressionKind
 	CompressionDictionary *compression.Dictionary
+	// ObserveRawBlock receives the encoded block before compression. The slice
+	// is ephemeral; observers must copy bounded samples and return promptly.
+	ObserveRawBlock func(raw []byte)
 }
 
 // NewSegment creates mutable segment writer state.
@@ -115,7 +118,7 @@ func NewSegment(opts Options) (*Segment, error) {
 		_ = fs.Remove(tempPath)
 		return nil, fmt.Errorf("segment: encode initial header: %w", err)
 	}
-	if err := writeAll(file, headerBytes); err != nil {
+	if err := disk.WriteAll(file, headerBytes); err != nil {
 		_ = file.Close()
 		_ = fs.Remove(tempPath)
 		return nil, fmt.Errorf("segment: write initial header: %w", err)
@@ -127,6 +130,7 @@ func NewSegment(opts Options) (*Segment, error) {
 		Bloom:            bloom,
 		compression:      opts.Compression,
 		dictionary:       opts.CompressionDictionary,
+		observeRawBlock:  opts.ObserveRawBlock,
 		fs:               fs,
 		file:             file,
 		path:             finalPath,
@@ -247,13 +251,13 @@ func (s *Segment) Freeze() error {
 		return fmt.Errorf("segment: encode footer: %w", err)
 	}
 
-	if err := writeAll(s.file, bloomBytes); err != nil {
+	if err := disk.WriteAll(s.file, bloomBytes); err != nil {
 		return fmt.Errorf("segment: write bloom section: %w", err)
 	}
-	if err := writeAll(s.file, indexBytes); err != nil {
+	if err := disk.WriteAll(s.file, indexBytes); err != nil {
 		return fmt.Errorf("segment: write index section: %w", err)
 	}
-	if err := writeAll(s.file, footerBytes); err != nil {
+	if err := disk.WriteAll(s.file, footerBytes); err != nil {
 		return fmt.Errorf("segment: write footer: %w", err)
 	}
 	if err := s.file.Sync(); err != nil {
@@ -266,17 +270,18 @@ func (s *Segment) Freeze() error {
 	if err := s.fs.Rename(s.tempPath, s.path); err != nil {
 		return fmt.Errorf("segment: rename temp file: %w", err)
 	}
-	if err := s.fs.SyncDir(filepath.Dir(s.path)); err != nil {
-		return fmt.Errorf("segment: sync segment dir: %w", err)
-	}
-
+	// The finalized path is visible now. Mark the object frozen before syncing
+	// the directory so a commit-uncertain error can never make Abort delete (or
+	// attempt to reuse) this complete output.
 	s.Footer = footer
 	s.frozen = true
-
 	s.currentBlock = Block{}
 	s.currentBlockSize = 0
 	s.lastKey = nil
 	s.dataLength = 0
+	if err := s.fs.SyncDir(filepath.Dir(s.path)); err != nil {
+		return fmt.Errorf("%w: segment: sync segment dir: %v", disk.ErrCommitUncertain, err)
+	}
 	return nil
 }
 
@@ -342,6 +347,7 @@ func (s *Segment) flushBlock() error {
 	if err != nil {
 		return fmt.Errorf("segment: encode block %d: %w", s.Index.Len(), err)
 	}
+	s.observeBlock(payload)
 	if s.compression == CompressionLZ4Dict {
 		payload, err = s.dictionary.Compress(payload)
 		if err != nil {
@@ -353,7 +359,7 @@ func (s *Segment) flushBlock() error {
 	}
 
 	offset := s.dataLength
-	if err := writeAll(s.file, payload); err != nil {
+	if err := disk.WriteAll(s.file, payload); err != nil {
 		return fmt.Errorf("segment: write block %d: %w", s.Index.Len(), err)
 	}
 	s.dataLength += uint64(len(payload))
@@ -364,4 +370,14 @@ func (s *Segment) flushBlock() error {
 	s.currentBlock = Block{}
 	s.currentBlockSize = rawBlockHeaderSize + rawBlockChecksumSize
 	return nil
+}
+
+func (s *Segment) observeBlock(raw []byte) {
+	if s.observeRawBlock == nil {
+		return
+	}
+	// Sampling is optional optimization. A faulty observer must never abort a
+	// segment commit or turn a successful mutation into data loss.
+	defer func() { _ = recover() }()
+	s.observeRawBlock(raw)
 }

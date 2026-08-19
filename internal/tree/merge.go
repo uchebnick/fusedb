@@ -1,9 +1,11 @@
 package tree
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 
+	"github.com/uchebnick/fusedb/internal/disk"
 	"github.com/uchebnick/fusedb/internal/leaf"
 	"github.com/uchebnick/fusedb/internal/manifest"
 	"github.com/uchebnick/fusedb/internal/ops"
@@ -30,6 +32,30 @@ func (t *Tree) PendingMerge() []*leaf.Leaf {
 
 // MergeAll merges every leaf that holds buffered writes.
 func (t *Tree) MergeAll() error {
+	return t.mergeAll(nil)
+}
+
+// MergeAllThrough merges exactly the frozen generation captured for seq.
+// Active writes that arrive after the caller's freeze boundary stay buffered;
+// revisiting them would put operations above seq into segments whose manifest
+// watermark only covers seq, causing non-idempotent WAL replay on restart.
+func (t *Tree) MergeAllThrough(seq uint64) error {
+	if t.closed.Load() {
+		return ErrClosed
+	}
+	retry := t.retrySnapshot()
+	for _, l := range t.snapshot() {
+		if l.PendingLen() == 0 && !contains(retry, l.ID()) {
+			continue
+		}
+		if err := t.mergeLeaf(l, &seq); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *Tree) mergeAll(appliedSeq *uint64) error {
 	if t.closed.Load() {
 		return ErrClosed
 	}
@@ -42,7 +68,7 @@ func (t *Tree) MergeAll() error {
 				continue
 			}
 			worked = true
-			if err := t.MergeLeaf(l); err != nil {
+			if err := t.mergeLeaf(l, appliedSeq); err != nil {
 				return err
 			}
 		}
@@ -63,6 +89,16 @@ func (t *Tree) MergeAll() error {
 // A leaf that is no longer part of the published tree is ignored, so a caller
 // may hand back a leaf list it collected earlier.
 func (t *Tree) MergeLeaf(l *leaf.Leaf) error {
+	return t.mergeLeaf(l, nil)
+}
+
+// MergeLeafThrough persists one independent leaf merge with an exact per-leaf
+// WAL replay watermark.
+func (t *Tree) MergeLeafThrough(l *leaf.Leaf, seq uint64) error {
+	return t.mergeLeaf(l, &seq)
+}
+
+func (t *Tree) mergeLeaf(l *leaf.Leaf, appliedSeq *uint64) error {
 	if t == nil || l == nil {
 		return nil
 	}
@@ -91,13 +127,21 @@ func (t *Tree) MergeLeaf(l *leaf.Leaf) error {
 		return fmt.Errorf("%w: %d", ErrLeafNotInManifest, l.ID())
 	}
 	record := next.Leaves[recordIndex]
+	coveredSeq := record.AppliedSeq
+	if appliedSeq != nil {
+		coveredSeq = *appliedSeq
+	}
 
 	// Allocation order matches output order, which is how each result learns
 	// the segment identity it was written with: MergeResult only carries the
 	// file, not the id it was given.
 	allocated := make([]segmentIdentity, 0, 4)
+	baseOptions, err := t.segmentOptions(record.DictionaryGroup())
+	if err != nil {
+		return fmt.Errorf("tree: select dictionary for leaf %d: %w", l.ID(), err)
+	}
 	results, err := l.MergeSplit(leaf.SplitOptions{
-		Base:     t.segmentOptions(),
+		Base:     baseOptions,
 		MaxBytes: t.maxLeafBytes,
 		Allocate: func(outputIndex int) (uint64, uint64, error) {
 			identity := segmentIdentity{segmentID: record.SegmentID, version: record.SegmentVersion + 1}
@@ -121,11 +165,11 @@ func (t *Tree) MergeLeaf(l *leaf.Leaf) error {
 
 	switch len(results) {
 	case 0:
-		return t.installEmptyLocked(l, next)
+		return t.installEmptyLocked(l, next, coveredSeq)
 	case 1:
-		return t.installMergeLocked(l, next, results[0], allocated[0])
+		return t.installMergeLocked(l, next, results[0], allocated[0], coveredSeq)
 	default:
-		return t.installSplitLocked(l, index, next, results, allocated)
+		return t.installSplitLocked(l, index, next, results, allocated, coveredSeq, record.DictionaryGroupID)
 	}
 }
 
@@ -135,12 +179,20 @@ type segmentIdentity struct {
 }
 
 // installEmptyLocked handles a merge whose every key resolved to a tombstone.
-func (t *Tree) installEmptyLocked(l *leaf.Leaf, next *manifest.Manifest) error {
+func (t *Tree) installEmptyLocked(l *leaf.Leaf, next *manifest.Manifest, appliedSeq uint64) error {
 	if err := next.SetLeafSegment(l.ID(), 0, 0); err != nil {
 		t.failMergeLocked(l.ID(), next, nil)
 		return err
 	}
+	if err := next.SetLeafAppliedSeq(l.ID(), appliedSeq); err != nil {
+		t.failMergeLocked(l.ID(), next, nil)
+		return err
+	}
 	if err := t.saveManifestLocked(next); err != nil {
+		if errors.Is(err, disk.ErrCommitUncertain) {
+			t.failUncertainMergeLocked(l.ID(), next, nil)
+			return fmt.Errorf("tree: save manifest: %w", err)
+		}
 		t.failMergeLocked(l.ID(), next, nil)
 		return fmt.Errorf("tree: save manifest: %w", err)
 	}
@@ -163,6 +215,7 @@ func (t *Tree) installMergeLocked(
 	next *manifest.Manifest,
 	result leaf.MergeResult,
 	identity segmentIdentity,
+	appliedSeq uint64,
 ) error {
 	if err := next.SetLeafSegment(l.ID(), identity.segmentID, identity.version); err != nil {
 		t.failMergeLocked(l.ID(), next, []leaf.MergeResult{result})
@@ -171,9 +224,17 @@ func (t *Tree) installMergeLocked(
 	if recordIndex := next.IndexOfLeafID(l.ID()); recordIndex >= 0 {
 		next.Leaves[recordIndex].Keys = uint64(result.Keys)
 	}
+	if err := next.SetLeafAppliedSeq(l.ID(), appliedSeq); err != nil {
+		t.failMergeLocked(l.ID(), next, []leaf.MergeResult{result})
+		return err
+	}
 	// The manifest has to name the new segment before the old one may be
 	// deleted, and the old one is only queued for deletion by InstallMerge.
 	if err := t.saveManifestLocked(next); err != nil {
+		if errors.Is(err, disk.ErrCommitUncertain) {
+			t.failUncertainMergeLocked(l.ID(), next, []leaf.MergeResult{result})
+			return fmt.Errorf("tree: save manifest: %w", err)
+		}
 		t.failMergeLocked(l.ID(), next, []leaf.MergeResult{result})
 		return fmt.Errorf("tree: save manifest: %w", err)
 	}
@@ -201,6 +262,8 @@ func (t *Tree) installSplitLocked(
 	next *manifest.Manifest,
 	results []leaf.MergeResult,
 	allocated []segmentIdentity,
+	appliedSeq uint64,
+	dictionaryGroupID uint64,
 ) error {
 	created := make([]*leaf.Leaf, len(results))
 	records := make([]manifest.LeafRecord, len(results))
@@ -213,11 +276,13 @@ func (t *Tree) installSplitLocked(
 		}
 		created[i] = t.newLeaf(leafID, result.LowKey, result.Reader, result.Keys)
 		records[i] = manifest.LeafRecord{
-			LeafID:         leafID,
-			LowKey:         result.LowKey,
-			SegmentID:      allocated[i].segmentID,
-			SegmentVersion: allocated[i].version,
-			Keys:           uint64(result.Keys),
+			LeafID:            leafID,
+			LowKey:            result.LowKey,
+			SegmentID:         allocated[i].segmentID,
+			SegmentVersion:    allocated[i].version,
+			Keys:              uint64(result.Keys),
+			AppliedSeq:        appliedSeq,
+			DictionaryGroupID: dictionaryGroupID,
 		}
 	}
 
@@ -231,8 +296,17 @@ func (t *Tree) installSplitLocked(
 	leaves = append(leaves, records...)
 	leaves = append(leaves, next.Leaves[recordIndex+1:]...)
 	next.Leaves = leaves
+	rebalanceDictionaryGroups(next.Leaves, t.dictionaryGroupLeaves)
+	if err := next.SetLeafAppliedSeq(records[0].LeafID, appliedSeq); err != nil {
+		t.abortSplitLocked(l.ID(), next, created, results)
+		return err
+	}
 
 	if err := t.saveManifestLocked(next); err != nil {
+		if errors.Is(err, disk.ErrCommitUncertain) {
+			t.failUncertainMergeLocked(l.ID(), next, results)
+			return fmt.Errorf("tree: save manifest: %w", err)
+		}
 		t.abortSplitLocked(l.ID(), next, created, results)
 		return fmt.Errorf("tree: save manifest: %w", err)
 	}
@@ -267,6 +341,55 @@ func (t *Tree) installSplitLocked(
 	return nil
 }
 
+// RebalanceDictionaryGroups migrates oversized legacy/default groups into
+// stable contiguous groups. A new group uses the first leaf ID in its range;
+// leaf IDs are never reused, so group IDs are stable without another allocator.
+func (t *Tree) RebalanceDictionaryGroups() error {
+	if t == nil || t.closed.Load() {
+		return ErrClosed
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	next := t.manifest.Clone()
+	if !rebalanceDictionaryGroups(next.Leaves, t.dictionaryGroupLeaves) {
+		return nil
+	}
+	if err := t.saveManifestLocked(next); err != nil {
+		return fmt.Errorf("tree: save dictionary groups: %w", err)
+	}
+	t.manifest = next
+	return nil
+}
+
+func rebalanceDictionaryGroups(leaves []manifest.LeafRecord, maximum int) bool {
+	if maximum <= 0 || len(leaves) <= maximum {
+		return false
+	}
+	changed := false
+	for start := 0; start < len(leaves); {
+		group := leaves[start].DictionaryGroup()
+		end := start + 1
+		for end < len(leaves) && leaves[end].DictionaryGroup() == group {
+			end++
+		}
+		for chunkStart := start; chunkStart < end; chunkStart += maximum {
+			chunkEnd := min(end, chunkStart+maximum)
+			chunkGroup := group
+			if chunkStart > start {
+				chunkGroup = leaves[chunkStart].LeafID
+			}
+			for i := chunkStart; i < chunkEnd; i++ {
+				if leaves[i].DictionaryGroupID != chunkGroup {
+					leaves[i].DictionaryGroupID = chunkGroup
+					changed = true
+				}
+			}
+		}
+		start = end
+	}
+	return changed
+}
+
 // failMergeLocked rolls a failed merge back to the state on disk.
 //
 // Segment ids consumed by the failed attempt are kept: the outputs are removed
@@ -279,6 +402,22 @@ func (t *Tree) failMergeLocked(leafID uint64, next *manifest.Manifest, results [
 	}
 	// The merge froze the leaf buffer before it failed. That data is invisible
 	// to BufferedLen, so the leaf has to be marked as still needing a merge.
+	t.retryMerge[leafID] = struct{}{}
+}
+
+// failUncertainMergeLocked handles a manifest rename that became visible but
+// whose directory sync failed. The process must reopen before continuing: the
+// old in-memory view is retained, while both old and newly referenced segment
+// files are preserved so either crash outcome remains recoverable.
+func (t *Tree) failUncertainMergeLocked(leafID uint64, next *manifest.Manifest, results []leaf.MergeResult) {
+	for _, result := range results {
+		if result.Reader != nil {
+			_ = result.Reader.Close()
+		}
+	}
+	if next != nil && next.NextSegmentID > t.manifest.NextSegmentID {
+		t.manifest.NextSegmentID = next.NextSegmentID
+	}
 	t.retryMerge[leafID] = struct{}{}
 }
 
@@ -349,13 +488,31 @@ func (t *Tree) currentIndexLocked(l *leaf.Leaf) (int, bool) {
 	return index, true
 }
 
-func (t *Tree) segmentOptions() segment.Options {
+func (t *Tree) segmentOptions(groupID uint64) (segment.Options, error) {
+	dictionary := t.dictionary
+	compressionKind := t.compression
+	if t.dictionaryForGroup != nil {
+		selected, err := t.dictionaryForGroup(groupID)
+		if err != nil {
+			return segment.Options{}, err
+		}
+		dictionary = selected
+		compressionKind = segment.CompressionNone
+		if dictionary != nil {
+			compressionKind = segment.CompressionLZ4Dict
+		}
+	}
 	return segment.Options{
 		FS:                    t.fs,
 		Dir:                   t.dir,
 		TargetBlockSize:       t.targetBlockSize,
 		BloomFalsePositive:    t.bloomFalsePositive,
-		Compression:           t.compression,
-		CompressionDictionary: t.dictionary,
-	}
+		Compression:           compressionKind,
+		CompressionDictionary: dictionary,
+		ObserveRawBlock: func(raw []byte) {
+			if t.observeDictionarySample != nil {
+				t.observeDictionarySample(groupID, raw)
+			}
+		},
+	}, nil
 }

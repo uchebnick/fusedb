@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+
+	"github.com/uchebnick/fusedb/internal/limits"
 )
 
 const (
@@ -91,7 +93,11 @@ func DecodeIndex(data []byte) (Index, error) {
 		return Index{}, fmt.Errorf("%w: missing entry count", ErrShortIndexBuffer)
 	}
 
-	count := int(binary.LittleEndian.Uint32(data[:4]))
+	count64 := uint64(binary.LittleEndian.Uint32(data[:4]))
+	if len(data) > limits.MaxSegmentMetadataBytes || count64 > uint64((len(data)-indexHeaderSize)/indexEntryHeaderSize) {
+		return Index{}, ErrCorruptIndex
+	}
+	count := int(count64)
 	pos := indexHeaderSize
 	entries := make([]BlockIndexEntry, 0, count)
 
@@ -99,12 +105,13 @@ func DecodeIndex(data []byte) (Index, error) {
 		if len(data)-pos < 4 {
 			return Index{}, fmt.Errorf("%w: entry %d missing separator length", ErrShortIndexBuffer, i)
 		}
-		sepLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+		sepLen64 := uint64(binary.LittleEndian.Uint32(data[pos : pos+4]))
 		pos += 4
 
-		if len(data)-pos < sepLen {
+		if sepLen64 > limits.MaxKeyBytes || sepLen64 > uint64(len(data)-pos) {
 			return Index{}, fmt.Errorf("%w: entry %d truncated separator", ErrShortIndexBuffer, i)
 		}
+		sepLen := int(sepLen64)
 		separator := append([]byte(nil), data[pos:pos+sepLen]...)
 		pos += sepLen
 

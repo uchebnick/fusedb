@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 
 	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/limits"
 )
 
 // DefaultFileName is the manifest file name inside a database directory.
@@ -57,6 +58,28 @@ var (
 
 	// ErrDuplicateLeafID reports two leaves sharing one identifier.
 	ErrDuplicateLeafID = errors.New("manifest: duplicate leaf id")
+
+	// ErrDuplicateSegmentID reports two leaves naming the same immutable
+	// segment lineage.
+	ErrDuplicateSegmentID = errors.New("manifest: duplicate segment id")
+
+	// ErrInvalidEmptySegment reports metadata attached to a leaf that has no
+	// segment.
+	ErrInvalidEmptySegment     = errors.New("manifest: empty segment has version or keys")
+	ErrSegmentKeyCountTooLarge = errors.New("manifest: segment key count exceeds safety limit")
+
+	// ErrNextSegmentIDNotAdvanced reports an allocator watermark that could
+	// reuse the id of a referenced segment.
+	ErrNextSegmentIDNotAdvanced = errors.New("manifest: next segment id is not above referenced ids")
+
+	// ErrSegmentIDExhausted reports that the allocator cannot advance past a
+	// referenced segment id.
+	ErrSegmentIDExhausted = errors.New("manifest: segment id space exhausted")
+
+	// ErrAppliedSeqMismatch reports a global WAL watermark that is not the
+	// minimum per-leaf watermark.
+	ErrAppliedSeqMismatch           = errors.New("manifest: global applied sequence differs from leaf watermarks")
+	ErrDictionaryGroupNotContiguous = errors.New("manifest: dictionary group is not contiguous")
 
 	// ErrEmptyLowKeyNotFirst reports an empty low key on a leaf other than the
 	// leftmost one.
@@ -90,6 +113,9 @@ type LeafRecord struct {
 	LowKey         []byte
 	SegmentID      uint64
 	SegmentVersion uint64
+	// DictionaryGroupID selects the adaptive dictionary policy for future
+	// merges of this range. Zero is the backward-compatible default group 1.
+	DictionaryGroupID uint64
 
 	// Keys is how many keys the segment holds.
 	//
@@ -98,6 +124,19 @@ type LeafRecord struct {
 	// size the filter from its buffer alone and land well above the target
 	// false positive rate.
 	Keys uint64
+
+	// AppliedSeq is the highest WAL sequence whose operation for this leaf is
+	// represented by SegmentID. Per-leaf watermarks make independently
+	// persisted merges safe to replay, including non-idempotent increments.
+	AppliedSeq uint64
+}
+
+// DictionaryGroup returns the effective non-zero dictionary group.
+func (r LeafRecord) DictionaryGroup() uint64 {
+	if r.DictionaryGroupID == 0 {
+		return 1
+	}
+	return r.DictionaryGroupID
 }
 
 // Manifest is the in-memory form of the persistent catalog.
@@ -115,11 +154,35 @@ type Manifest struct {
 
 	// Leaves are sorted strictly ascending by LowKey.
 	Leaves []LeafRecord
+
+	// sourceVersion records the version decoded from disk. It is deliberately
+	// not exported or serialized as data: callers use SourceVersion only to
+	// decide whether a legacy manifest needs a one-time rewrite.
+	sourceVersion uint32
 }
 
 // New returns an empty manifest ready for a fresh database.
 func New() *Manifest {
-	return &Manifest{NextSegmentID: 1}
+	return &Manifest{NextSegmentID: 1, sourceVersion: CurrentFormatVersion}
+}
+
+// SourceVersion reports the on-disk version this manifest was decoded from.
+// Programmatically constructed manifests are treated as current because
+// MarshalBinary always emits CurrentFormatVersion.
+func (m *Manifest) SourceVersion() uint32 {
+	if m == nil {
+		return 0
+	}
+	if m.sourceVersion == 0 {
+		return CurrentFormatVersion
+	}
+	return m.sourceVersion
+}
+
+// NeedsFormatUpgrade reports whether saving this manifest will migrate it to
+// the current on-disk representation.
+func (m *Manifest) NeedsFormatUpgrade() bool {
+	return m != nil && m.SourceVersion() != CurrentFormatVersion
 }
 
 // FileName returns the manifest path inside a database directory.
@@ -148,6 +211,7 @@ func (m *Manifest) Clone() *Manifest {
 	out := &Manifest{
 		NextSegmentID: m.NextSegmentID,
 		AppliedSeq:    m.AppliedSeq,
+		sourceVersion: m.sourceVersion,
 	}
 	if m.Leaves == nil {
 		return out
@@ -187,8 +251,23 @@ func (m *Manifest) Validate() error {
 	}
 
 	seen := make(map[uint64]struct{}, len(m.Leaves))
+	seenSegments := make(map[uint64]struct{}, len(m.Leaves))
+	closedGroups := make(map[uint64]struct{})
+	var previousGroup uint64
+	var maxSegmentID uint64
+	minAppliedSeq := ^uint64(0)
 	for i := range m.Leaves {
 		leaf := &m.Leaves[i]
+		group := leaf.DictionaryGroup()
+		if i == 0 {
+			previousGroup = group
+		} else if group != previousGroup {
+			closedGroups[previousGroup] = struct{}{}
+			if _, repeated := closedGroups[group]; repeated {
+				return fmt.Errorf("%w: %d", ErrDictionaryGroupNotContiguous, group)
+			}
+			previousGroup = group
+		}
 		if i > 0 && len(leaf.LowKey) == 0 {
 			return fmt.Errorf("%w: index %d", ErrEmptyLowKeyNotFirst, i)
 		}
@@ -196,6 +275,25 @@ func (m *Manifest) Validate() error {
 			return fmt.Errorf("%w: %d", ErrDuplicateLeafID, leaf.LeafID)
 		}
 		seen[leaf.LeafID] = struct{}{}
+		if leaf.AppliedSeq < minAppliedSeq {
+			minAppliedSeq = leaf.AppliedSeq
+		}
+		if leaf.SegmentID == 0 {
+			if leaf.SegmentVersion != 0 || leaf.Keys != 0 {
+				return fmt.Errorf("%w: leaf %d", ErrInvalidEmptySegment, leaf.LeafID)
+			}
+		} else {
+			if leaf.Keys > limits.MaxSegmentKeys {
+				return fmt.Errorf("%w: leaf %d has %d", ErrSegmentKeyCountTooLarge, leaf.LeafID, leaf.Keys)
+			}
+			if _, dup := seenSegments[leaf.SegmentID]; dup {
+				return fmt.Errorf("%w: %d", ErrDuplicateSegmentID, leaf.SegmentID)
+			}
+			seenSegments[leaf.SegmentID] = struct{}{}
+			if leaf.SegmentID > maxSegmentID {
+				maxSegmentID = leaf.SegmentID
+			}
+		}
 
 		if i == 0 {
 			continue
@@ -206,6 +304,12 @@ func (m *Manifest) Validate() error {
 		case 1:
 			return fmt.Errorf("%w: index %d", ErrLeavesNotSorted, i)
 		}
+	}
+	if maxSegmentID >= m.NextSegmentID {
+		return fmt.Errorf("%w: next %d, max %d", ErrNextSegmentIDNotAdvanced, m.NextSegmentID, maxSegmentID)
+	}
+	if m.AppliedSeq != minAppliedSeq {
+		return fmt.Errorf("%w: global %d, minimum leaf %d", ErrAppliedSeqMismatch, m.AppliedSeq, minAppliedSeq)
 	}
 	return nil
 }
@@ -268,6 +372,17 @@ func (m *Manifest) AddLeaf(leaf LeafRecord) error {
 	if m.IndexOfLeafID(leaf.LeafID) >= 0 {
 		return fmt.Errorf("%w: %d", ErrDuplicateLeafID, leaf.LeafID)
 	}
+	if err := validateLeafSegment(leaf); err != nil {
+		return err
+	}
+	for _, existing := range m.Leaves {
+		if leaf.SegmentID != 0 && existing.SegmentID == leaf.SegmentID {
+			return fmt.Errorf("%w: %d", ErrDuplicateSegmentID, leaf.SegmentID)
+		}
+	}
+	if err := m.advanceSegmentID(leaf.SegmentID); err != nil {
+		return err
+	}
 
 	pos := m.searchLowKey(leaf.LowKey)
 	if pos < len(m.Leaves) && bytes.Equal(m.Leaves[pos].LowKey, leaf.LowKey) {
@@ -278,6 +393,7 @@ func (m *Manifest) AddLeaf(leaf LeafRecord) error {
 	m.Leaves = append(m.Leaves, LeafRecord{})
 	copy(m.Leaves[pos+1:], m.Leaves[pos:])
 	m.Leaves[pos] = leaf
+	m.recomputeAppliedSeq()
 	return nil
 }
 
@@ -304,6 +420,15 @@ func (m *Manifest) SplitLeaf(leafID uint64, left, right LeafRecord) error {
 	if idx+1 < len(m.Leaves) && bytes.Compare(right.LowKey, m.Leaves[idx+1].LowKey) >= 0 {
 		return fmt.Errorf("%w: %x", ErrInvalidSplitKey, right.LowKey)
 	}
+	if err := validateLeafSegment(left); err != nil {
+		return err
+	}
+	if err := validateLeafSegment(right); err != nil {
+		return err
+	}
+	if left.SegmentID != 0 && left.SegmentID == right.SegmentID {
+		return fmt.Errorf("%w: %d", ErrDuplicateSegmentID, left.SegmentID)
+	}
 	if left.LeafID == right.LeafID {
 		return fmt.Errorf("%w: %d", ErrDuplicateLeafID, left.LeafID)
 	}
@@ -314,6 +439,16 @@ func (m *Manifest) SplitLeaf(leafID uint64, left, right LeafRecord) error {
 		if m.Leaves[i].LeafID == left.LeafID || m.Leaves[i].LeafID == right.LeafID {
 			return fmt.Errorf("%w: %d", ErrDuplicateLeafID, m.Leaves[i].LeafID)
 		}
+		if (left.SegmentID != 0 && m.Leaves[i].SegmentID == left.SegmentID) ||
+			(right.SegmentID != 0 && m.Leaves[i].SegmentID == right.SegmentID) {
+			return fmt.Errorf("%w: %d", ErrDuplicateSegmentID, m.Leaves[i].SegmentID)
+		}
+	}
+	if err := m.advanceSegmentID(left.SegmentID); err != nil {
+		return err
+	}
+	if err := m.advanceSegmentID(right.SegmentID); err != nil {
+		return err
 	}
 
 	left.LowKey = cloneKey(left.LowKey)
@@ -322,6 +457,7 @@ func (m *Manifest) SplitLeaf(leafID uint64, left, right LeafRecord) error {
 	copy(m.Leaves[idx+2:], m.Leaves[idx+1:])
 	m.Leaves[idx] = left
 	m.Leaves[idx+1] = right
+	m.recomputeAppliedSeq()
 	return nil
 }
 
@@ -336,8 +472,89 @@ func (m *Manifest) SetLeafSegment(leafID, segmentID, segmentVersion uint64) erro
 	if idx < 0 {
 		return fmt.Errorf("%w: %d", ErrLeafNotFound, leafID)
 	}
+	if err := validateLeafSegment(LeafRecord{LeafID: leafID, SegmentID: segmentID, SegmentVersion: segmentVersion}); err != nil {
+		return err
+	}
+	for i := range m.Leaves {
+		if i != idx && segmentID != 0 && m.Leaves[i].SegmentID == segmentID {
+			return fmt.Errorf("%w: %d", ErrDuplicateSegmentID, segmentID)
+		}
+	}
+	if err := m.advanceSegmentID(segmentID); err != nil {
+		return err
+	}
 	m.Leaves[idx].SegmentID = segmentID
 	m.Leaves[idx].SegmentVersion = segmentVersion
+	if segmentID == 0 {
+		m.Leaves[idx].Keys = 0
+	}
+	return nil
+}
+
+// SetLeafAppliedSeq advances one leaf's replay watermark and recomputes the
+// global truncation-safe watermark.
+func (m *Manifest) SetLeafAppliedSeq(leafID, seq uint64) error {
+	if m == nil {
+		return ErrNilManifest
+	}
+	idx := m.IndexOfLeafID(leafID)
+	if idx < 0 {
+		return fmt.Errorf("%w: %d", ErrLeafNotFound, leafID)
+	}
+	if seq < m.Leaves[idx].AppliedSeq {
+		return fmt.Errorf("manifest: applied sequence moved backwards: leaf %d from %d to %d", leafID, m.Leaves[idx].AppliedSeq, seq)
+	}
+	m.Leaves[idx].AppliedSeq = seq
+	m.recomputeAppliedSeq()
+	return nil
+}
+
+// SetAllAppliedSeq advances every leaf after a complete checkpoint.
+func (m *Manifest) SetAllAppliedSeq(seq uint64) error {
+	if m == nil {
+		return ErrNilManifest
+	}
+	for i := range m.Leaves {
+		if seq < m.Leaves[i].AppliedSeq {
+			return fmt.Errorf("manifest: applied sequence moved backwards: leaf %d from %d to %d", m.Leaves[i].LeafID, m.Leaves[i].AppliedSeq, seq)
+		}
+	}
+	for i := range m.Leaves {
+		m.Leaves[i].AppliedSeq = seq
+	}
+	m.recomputeAppliedSeq()
+	return nil
+}
+
+func (m *Manifest) recomputeAppliedSeq() {
+	if len(m.Leaves) == 0 {
+		m.AppliedSeq = 0
+		return
+	}
+	minimum := m.Leaves[0].AppliedSeq
+	for i := 1; i < len(m.Leaves); i++ {
+		if m.Leaves[i].AppliedSeq < minimum {
+			minimum = m.Leaves[i].AppliedSeq
+		}
+	}
+	m.AppliedSeq = minimum
+}
+
+func validateLeafSegment(leaf LeafRecord) error {
+	if leaf.SegmentID == 0 && (leaf.SegmentVersion != 0 || leaf.Keys != 0) {
+		return fmt.Errorf("%w: leaf %d", ErrInvalidEmptySegment, leaf.LeafID)
+	}
+	return nil
+}
+
+func (m *Manifest) advanceSegmentID(segmentID uint64) error {
+	if segmentID == 0 || m.NextSegmentID > segmentID {
+		return nil
+	}
+	if segmentID == ^uint64(0) {
+		return ErrSegmentIDExhausted
+	}
+	m.NextSegmentID = segmentID + 1
 	return nil
 }
 
@@ -367,7 +584,11 @@ func Save(fs disk.FS, path string, m *Manifest) error {
 	if err != nil {
 		return err
 	}
-	return disk.WriteFileAtomically(fs, path, data)
+	if err := disk.WriteFileAtomically(fs, path, data); err != nil {
+		return err
+	}
+	m.sourceVersion = CurrentFormatVersion
+	return nil
 }
 
 // Load reads and verifies the manifest at path.
@@ -378,7 +599,7 @@ func Load(fs disk.FS, path string) (*Manifest, error) {
 	if fs == nil {
 		return nil, ErrNilFilesystem
 	}
-	data, err := disk.ReadFile(fs, path)
+	data, err := disk.ReadFileLimited(fs, path, limits.MaxManifestBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %s: %w", ErrNotExist, path, os.ErrNotExist)

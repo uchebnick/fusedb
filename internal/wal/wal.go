@@ -3,6 +3,8 @@ package wal
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/limits"
 )
 
 const (
@@ -54,12 +57,17 @@ type WAL struct {
 
 	mu      sync.Mutex
 	active  []byte
+	spare   []byte
 	nextSeq uint64
 	closed  bool
 	pending sync.WaitGroup
 
 	lastSeq atomic.Uint64
 	baseSeq atomic.Uint64
+	// persistenceErr is latched after the first write or sync failure. The
+	// current handle must not accept more records or checkpoint from a sequence
+	// that may describe a record absent from the in-memory tree.
+	persistenceErr atomic.Pointer[error]
 
 	flushCh  chan flushRequest
 	rotateCh chan rotateRequest
@@ -77,7 +85,8 @@ type WAL struct {
 }
 
 type flushRequest struct {
-	done chan error
+	done     chan error
+	coalesce bool
 }
 
 type rotateRequest struct {
@@ -132,7 +141,7 @@ func Open(opts Options) (*WAL, error) {
 		bufferSize:    bufferSize,
 		active:        make([]byte, 0, bufferSize),
 		nextSeq:       lastSeq + 1,
-		flushCh:       make(chan flushRequest),
+		flushCh:       make(chan flushRequest, 4096),
 		rotateCh:      make(chan rotateRequest),
 		stop:          make(chan struct{}),
 		done:          make(chan error, 1),
@@ -171,14 +180,7 @@ func recoverFile(fs disk.FS, path string) (baseSeq, lastSeq uint64, end int64, t
 	}
 
 	if result.TruncatedTail {
-		data, err := disk.ReadFile(fs, path)
-		if err != nil {
-			return 0, 0, 0, false, err
-		}
-		if int64(len(data)) < result.ValidEnd {
-			return 0, 0, 0, false, ErrShortWALFile
-		}
-		if err := installFile(fs, path, data[:result.ValidEnd]); err != nil {
+		if err := installPrefix(fs, path, result.ValidEnd); err != nil {
 			return 0, 0, 0, false, err
 		}
 	}
@@ -222,6 +224,18 @@ func (w *WAL) AppendInc(key []byte, delta int64) (uint64, error) {
 	return w.append(recordKindInc, key, buf[:n])
 }
 
+// AppendBatch appends all mutations as one checksummed WAL record. Replay can
+// apply individual members according to their leaf watermarks while the
+// record's single sequence number preserves the atomic commit boundary.
+func (w *WAL) AppendBatch(mutations []BatchMutation) (uint64, int, error) {
+	payload, err := EncodeBatch(mutations)
+	if err != nil {
+		return 0, 0, err
+	}
+	seq, err := w.append(recordKindBatch, nil, payload)
+	return seq, len(payload), err
+}
+
 // Append logs an arbitrary operation and returns the assigned sequence number.
 func (w *WAL) Append(record Record) (uint64, error) {
 	kind, err := recordKindOf(record.Kind)
@@ -232,7 +246,8 @@ func (w *WAL) Append(record Record) (uint64, error) {
 }
 
 func (w *WAL) append(kind byte, key, payload []byte) (uint64, error) {
-	if !lengthFits(len(key)) || !lengthFits(len(payload)) {
+	if !lengthFits(len(key)) || !lengthFits(len(payload)) ||
+		len(key) > limits.MaxKeyBytes || len(payload) > limits.MaxWALPayloadBytes {
 		return 0, ErrRecordTooLarge
 	}
 
@@ -240,6 +255,10 @@ func (w *WAL) append(kind byte, key, payload []byte) (uint64, error) {
 	if w.closed {
 		w.mu.Unlock()
 		return 0, ErrClosed
+	}
+	if err := w.Err(); err != nil {
+		w.mu.Unlock()
+		return 0, err
 	}
 	seq := w.nextSeq
 	w.nextSeq++
@@ -254,7 +273,7 @@ func (w *WAL) append(kind byte, key, payload []byte) (uint64, error) {
 	w.mu.Unlock()
 	defer w.pending.Done()
 
-	return seq, w.requestFlush()
+	return seq, w.requestFlush(true)
 }
 
 // Sync flushes every staged record and syncs the file.
@@ -264,15 +283,19 @@ func (w *WAL) Sync() error {
 		w.mu.Unlock()
 		return ErrClosed
 	}
+	if err := w.Err(); err != nil {
+		w.mu.Unlock()
+		return err
+	}
 	w.pending.Add(1)
 	w.mu.Unlock()
 	defer w.pending.Done()
 
-	return w.requestFlush()
+	return w.requestFlush(false)
 }
 
-func (w *WAL) requestFlush() error {
-	request := flushRequest{done: make(chan error, 1)}
+func (w *WAL) requestFlush(coalesce bool) error {
+	request := flushRequest{done: make(chan error, 1), coalesce: coalesce}
 	w.flushCh <- request
 	return <-request.done
 }
@@ -288,6 +311,10 @@ func (w *WAL) Truncate(upToSeq uint64) error {
 	if w.closed {
 		w.mu.Unlock()
 		return ErrClosed
+	}
+	if err := w.Err(); err != nil {
+		w.mu.Unlock()
+		return err
 	}
 	w.pending.Add(1)
 	w.mu.Unlock()
@@ -324,13 +351,47 @@ func (w *WAL) Close() error {
 func (w *WAL) run() {
 	ticker := time.NewTicker(w.groupEvery)
 	defer ticker.Stop()
+	groupTimer := time.NewTimer(time.Hour)
+	if !groupTimer.Stop() {
+		<-groupTimer.C
+	}
+	defer groupTimer.Stop()
+	requests := make([]flushRequest, 0, 64)
 
 	for {
 		select {
 		case <-ticker.C:
 			_ = w.flushActive()
 		case request := <-w.flushCh:
-			request.done <- w.flushActive()
+			requests = append(requests[:0], request)
+			if !request.coalesce {
+				err := w.flushActive()
+				request.done <- err
+				continue
+			}
+			groupTimer.Reset(w.groupEvery)
+		collect:
+			for len(requests) < cap(w.flushCh) {
+				select {
+				case next := <-w.flushCh:
+					requests = append(requests, next)
+					if !next.coalesce {
+						break collect
+					}
+				case <-groupTimer.C:
+					break collect
+				}
+			}
+			if !groupTimer.Stop() {
+				select {
+				case <-groupTimer.C:
+				default:
+				}
+			}
+			err := w.flushActive()
+			for _, pending := range requests {
+				pending.done <- err
+			}
 		case request := <-w.rotateCh:
 			request.done <- w.rotate(request.upToSeq)
 		case <-w.stop:
@@ -342,17 +403,33 @@ func (w *WAL) run() {
 }
 
 func (w *WAL) flushActive() error {
+	if err := w.Err(); err != nil {
+		return err
+	}
 	data := w.swapActive()
 	if len(data) == 0 {
 		return nil
 	}
 	if w.file == nil {
+		w.recycle(data)
 		return ErrClosed
 	}
-	if err := w.writeAt(data); err != nil {
-		return err
+	written, err := w.writeAt(data)
+	if err != nil {
+		// A malformed zero-progress/invalid-count writer cannot prove that no
+		// bytes became visible, so classify it conservatively as uncertain.
+		uncertain := written > 0 || errors.Is(err, io.ErrShortWrite)
+		failure := w.failPersistence(err, uncertain)
+		w.recycle(data)
+		return failure
 	}
-	return w.file.Sync()
+	if err := w.file.Sync(); err != nil {
+		failure := w.failPersistence(err, true)
+		w.recycle(data)
+		return failure
+	}
+	w.recycle(data)
+	return nil
 }
 
 func (w *WAL) swapActive() []byte {
@@ -363,23 +440,55 @@ func (w *WAL) swapActive() []byte {
 		return nil
 	}
 	data := w.active
-	w.active = make([]byte, 0, max(cap(data), w.bufferSize))
+	if w.spare != nil {
+		w.active = w.spare[:0]
+		w.spare = nil
+	} else {
+		w.active = make([]byte, 0, max(cap(data), w.bufferSize))
+	}
 	return data
 }
 
-func (w *WAL) writeAt(data []byte) error {
-	for len(data) > 0 {
-		n, err := w.file.WriteAt(data, w.offset)
-		w.offset += int64(n)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return errors.New("wal: short write")
-		}
-		data = data[n:]
+func (w *WAL) recycle(data []byte) {
+	if data == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.spare == nil || cap(data) > cap(w.spare) {
+		w.spare = data[:0]
+	}
+	w.mu.Unlock()
+}
+
+func (w *WAL) writeAt(data []byte) (int, error) {
+	written, err := disk.WriteAllAt(w.file, data, w.offset)
+	w.offset += int64(written)
+	return written, err
+}
+
+// Err reports the first terminal persistence failure, if any.
+func (w *WAL) Err() error {
+	if w == nil {
+		return nil
+	}
+	if err := w.persistenceErr.Load(); err != nil {
+		return *err
 	}
 	return nil
+}
+
+func (w *WAL) failPersistence(cause error, uncertain bool) error {
+	if cause == nil {
+		return nil
+	}
+	var failure error
+	if uncertain {
+		failure = fmt.Errorf("%w: %w: %w", ErrPersistence, disk.ErrCommitUncertain, cause)
+	} else {
+		failure = fmt.Errorf("%w: %w", ErrPersistence, cause)
+	}
+	w.persistenceErr.CompareAndSwap(nil, &failure)
+	return w.Err()
 }
 
 // rotate runs on the writer goroutine and replaces the log file with one that
@@ -393,23 +502,6 @@ func (w *WAL) rotate(upToSeq uint64) error {
 		upToSeq = last
 	}
 
-	newBase := upToSeq + 1
-	buf := encodeFileHeader(newBase)
-	_, err := Iterate(w.fs, w.path, func(record Record) error {
-		if record.Seq < newBase {
-			return nil
-		}
-		kind, err := recordKindOf(record.Kind)
-		if err != nil {
-			return err
-		}
-		buf = appendRecord(buf, kind, record.Seq, record.Key, record.Payload)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
 	// The handle must be released before the rename so the platform can swap
 	// the file underneath it.
 	oldOffset := w.offset
@@ -418,7 +510,40 @@ func (w *WAL) rotate(upToSeq uint64) error {
 	}
 	w.file = nil
 
-	if err := installFile(w.fs, w.path, buf); err != nil {
+	newBase := upToSeq + 1
+	newOffset := int64(fileHeaderSize)
+	if err := installFileStreaming(w.fs, w.path, func(file disk.File) error {
+		if _, err := disk.WriteAllAt(file, encodeFileHeader(newBase), 0); err != nil {
+			return err
+		}
+		var recordBuf []byte
+		_, err := Iterate(w.fs, w.path, func(record Record) error {
+			if record.Seq < newBase {
+				return nil
+			}
+			kind, err := recordKindOf(record.Kind)
+			if err != nil {
+				return err
+			}
+			recordBuf = appendRecord(recordBuf[:0], kind, record.Seq, record.Key, record.Payload)
+			if _, err := disk.WriteAllAt(file, recordBuf, newOffset); err != nil {
+				return err
+			}
+			newOffset += int64(len(recordBuf))
+			return nil
+		})
+		return err
+	}); err != nil {
+		if errors.Is(err, disk.ErrCommitUncertain) {
+			file, reopenErr := w.fs.OpenReadWrite(w.path)
+			if reopenErr != nil {
+				return errors.Join(err, reopenErr)
+			}
+			w.file = file
+			w.offset = newOffset
+			w.baseSeq.Store(newBase)
+			return err
+		}
 		// The original file survived the failed rotation; reattach to it so the
 		// log stays usable.
 		w.reopen(oldOffset)
@@ -430,7 +555,7 @@ func (w *WAL) rotate(upToSeq uint64) error {
 		return err
 	}
 	w.file = file
-	w.offset = int64(len(buf))
+	w.offset = newOffset
 	w.baseSeq.Store(newBase)
 	return nil
 }
@@ -447,6 +572,56 @@ func (w *WAL) reopen(offset int64) {
 // installFile writes data through a temporary file and renames it into place
 // once synced.
 func installFile(fs disk.FS, path string, data []byte) error {
+	return installFileStreaming(fs, path, func(file disk.File) error {
+		_, err := disk.WriteAllAt(file, data, 0)
+		return err
+	})
+}
+
+// installPrefix replaces path with its first size bytes without materializing
+// the WAL in memory. It is used after torn-tail recovery, where the retained
+// prefix may be many gigabytes.
+func installPrefix(fs disk.FS, path string, size int64) error {
+	if size < 0 {
+		return ErrShortWALFile
+	}
+	source, err := fs.Open(path)
+	if err != nil {
+		return err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = source.Close()
+		}
+	}()
+
+	err = installFileStreaming(fs, path, func(destination disk.File) error {
+		buffer := make([]byte, readerBufferSize)
+		var offset int64
+		for offset < size {
+			chunk := int64(len(buffer))
+			if remaining := size - offset; remaining < chunk {
+				chunk = remaining
+			}
+			part := buffer[:int(chunk)]
+			n, readErr := source.ReadAt(part, offset)
+			if n != len(part) || (readErr != nil && !errors.Is(readErr, io.EOF)) {
+				return ErrShortWALFile
+			}
+			if _, err := disk.WriteAllAt(destination, part, offset); err != nil {
+				return err
+			}
+			offset += int64(n)
+		}
+		closeErr := source.Close()
+		closed = true
+		return closeErr
+	})
+	return err
+}
+
+func installFileStreaming(fs disk.FS, path string, write func(disk.File) error) error {
 	tmpPath := path + tempSuffix
 	file, err := fs.Create(tmpPath)
 	if err != nil {
@@ -461,8 +636,8 @@ func installFile(fs disk.FS, path string, data []byte) error {
 		}
 	}()
 
-	if len(data) > 0 {
-		if _, err := file.WriteAt(data, 0); err != nil {
+	if write != nil {
+		if err := write(file); err != nil {
 			return err
 		}
 	}
@@ -478,12 +653,17 @@ func installFile(fs disk.FS, path string, data []byte) error {
 	renamed = true
 
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
-		return fs.SyncDir(dir)
+		if err := fs.SyncDir(dir); err != nil {
+			return fmt.Errorf("%w: %v", disk.ErrCommitUncertain, err)
+		}
 	}
 	return nil
 }
 
 func (w *WAL) closeFile(prevErr error) error {
+	if prevErr == nil {
+		prevErr = w.Err()
+	}
 	if w.file == nil {
 		return prevErr
 	}

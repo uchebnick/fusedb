@@ -15,6 +15,9 @@ const (
 	OpDelete
 	// OpInc adds a signed integer delta to a counter value.
 	OpInc
+	// OpBatch is a WAL-only container for one atomic group of mutations. It is
+	// never inserted into a leaf buffer.
+	OpBatch
 )
 
 // Op is one immutable buffered mutation.

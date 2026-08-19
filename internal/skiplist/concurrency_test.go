@@ -41,6 +41,14 @@ func TestConcurrentPutReadDifferentKeys(t *testing.T) {
 	if got := list.DataBytes(); got != want*int64(len("value")) {
 		t.Fatalf("data bytes = %d, want %d", got, want*int64(len("value")))
 	}
+	for worker := 0; worker < writers; worker++ {
+		for i := 0; i < perWriter; i++ {
+			key := []byte(fmt.Sprintf("worker:%02d:key:%04d", worker, i))
+			if _, ok := list.Read(key); !ok {
+				t.Fatalf("published key %q disappeared", key)
+			}
+		}
+	}
 }
 
 func TestConcurrentMixedOperationsRace(t *testing.T) {

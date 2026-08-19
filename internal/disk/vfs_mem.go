@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -93,11 +96,40 @@ func (i *memFileInfo) Sys() any           { return nil }
 type memFS struct {
 	mu    sync.Mutex
 	files map[string]*memNode
+	locks map[string]bool
 }
 
 // NewMemFS returns an in-memory FS for use in tests.
 func NewMemFS() FS {
-	return &memFS{files: make(map[string]*memNode)}
+	return &memFS{files: make(map[string]*memNode), locks: make(map[string]bool)}
+}
+
+func (m *memFS) Lock(name string) (Lock, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.locks[name] {
+		return nil, ErrLocked
+	}
+	m.locks[name] = true
+	return &memLock{fs: m, name: name}, nil
+}
+
+type memLock struct {
+	fs   *memFS
+	name string
+	once sync.Once
+}
+
+func (l *memLock) Close() error {
+	if l == nil || l.fs == nil {
+		return nil
+	}
+	l.once.Do(func() {
+		l.fs.mu.Lock()
+		delete(l.fs.locks, l.name)
+		l.fs.mu.Unlock()
+	})
+	return nil
 }
 
 func (m *memFS) create(name string) (File, error) {
@@ -150,13 +182,37 @@ func (m *memFS) SyncDir(_ string) error { return nil }
 
 func (m *memFS) MkdirAll(_ string) error { return nil }
 
-func (m *memFS) List(_ string) ([]string, error) {
+func (m *memFS) List(dir string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	names := make([]string, 0, len(m.files))
+	dir = filepath.Clean(dir)
+	prefix := ""
+	if dir != "." && dir != "" {
+		prefix = dir + string(filepath.Separator)
+	}
+	seen := make(map[string]struct{})
 	for name := range m.files {
+		clean := filepath.Clean(name)
+		if prefix != "" {
+			if !strings.HasPrefix(clean, prefix) {
+				continue
+			}
+			clean = strings.TrimPrefix(clean, prefix)
+		} else if filepath.IsAbs(clean) {
+			continue
+		}
+		part := strings.SplitN(clean, string(filepath.Separator), 2)[0]
+		listed := part
+		if prefix != "" {
+			listed = filepath.Join(dir, part)
+		}
+		seen[listed] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names, nil
 }
 

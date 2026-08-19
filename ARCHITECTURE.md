@@ -13,6 +13,7 @@ Technical documentation of FuseDB internals for contributors and researchers.
 - [Skiplist Implementation](#skiplist-implementation)
 - [Leaf Buffer](#leaf-buffer)
 - [Write-Ahead Log](#write-ahead-log)
+- [Directory Format Gate](#directory-format-gate)
 - [Manifest](#manifest)
 - [Merge and Split](#merge-and-split)
 - [Recovery and Checkpoints](#recovery-and-checkpoints)
@@ -31,7 +32,8 @@ half-open key range, an in-memory mutation buffer, and at most one immutable
 on-disk segment. Each leaf merges independently, so the volume rewritten by one
 merge is bounded by the leaf size rather than by the size of the database.
 
-The public entry point is `pkg/oneleafdb` (`DB`, `OpenDB`).
+The supported public entry point is `pkg/fusedb` (`DB`, `Open`).
+`pkg/oneleafdb` is the engine behind that facade and is not a stable API.
 
 ### Core Components
 
@@ -64,6 +66,18 @@ already covered by segments. Rewritten in full and atomically on every update.
 **Compression** (`internal/compression`)
 Optional LZ4 dictionary compression with a persistent registry. Dictionaries are
 trained offline from representative samples and stored as `.zdict` files.
+
+**Background Scheduler** (`internal/scheduler`, `internal/metrics`)
+Adaptive admission for merge, checkpoint, and future dictionary jobs. It learns
+foreground rate patterns, protects p95/p99 with hysteresis, tracks resource
+headroom, and preempts cooperative optional work when load returns. See
+[`docs/scheduler.md`](./docs/scheduler.md).
+
+**Observability Adapter** (`pkg/fusedb/prometheus`)
+An optional custom collector over immutable health, metrics, statistics, and
+format snapshots. It performs no storage I/O during scrape, uses only fixed
+label enumerations, and leaves registration lifecycle to the embedding
+application. Prometheus rules and the Grafana dashboard live under `monitoring`.
 
 **Cache** (`pkg/oneleafdb/cache.go`)
 Map-based value cache with sharded epoch invalidation. Evicts arbitrary entries
@@ -557,6 +571,10 @@ reads any variable-size field. Checksums use the Castagnoli polynomial, which ha
 hardware support on amd64/arm64 and matters because the log checksums every
 mutation on the write path.
 
+Key and payload lengths are rejected against epoch-2 format ceilings before a
+body allocation. Live mutations use the same limits, so the writer cannot emit
+a record that its recovery reader refuses.
+
 Code path: `appendRecord`.
 
 ### Group Commit
@@ -594,6 +612,12 @@ calls `Sync`.
 happens on the next group commit, on an explicit `Sync`, or on `Close`.
 **Sync (`SyncWrites`):** `Append` requests a flush and waits for it.
 
+Any WAL write or sync failure is latched as `ErrPersistence`. Partial writes
+and sync failures additionally wrap `disk.ErrCommitUncertain`. The WAL rejects
+all later appends and the database refuses to checkpoint the poisoned sequence;
+reopen either truncates an incomplete tail or replays a complete record exactly
+once.
+
 ### Reading and Recovery
 
 `Cursor`, `Iterate`, and `ReadAll` walk the log from the beginning. A cursor stops
@@ -607,7 +631,8 @@ at the first record it cannot verify:
 
 `Open` runs this pass first. A torn tail is physically dropped by rewriting the
 file, so leftover bytes from an interrupted write are never mistaken for a record
-on a later pass.
+on a later pass. The valid prefix is copied in fixed-size chunks; opening a large
+WAL never materializes the whole file in memory.
 
 ### Truncation
 
@@ -615,7 +640,25 @@ on a later pass.
 rewritten into a fresh file whose header declares `baseSeq = upToSeq+1`. The
 replacement is installed through a temporary file, an atomic rename, and a
 directory sync, so a crash at any point leaves either the old or the new complete
-log in place.
+log in place. Surviving records are streamed into the replacement one at a time,
+bounding rotation memory by one WAL record rather than total log size.
+
+---
+
+## Directory Format Gate
+
+Files: `internal/dbformat/format.go`
+
+Every current database directory has a fixed-size, CRC-checked `FORMAT` file.
+It declares the storage epoch, minimum reader/writer epochs, and required and
+optional feature masks. `Open` validates it before opening mutable registries or
+rewriting metadata. Unknown required features and newer epochs fail early;
+unknown optional features are ignored.
+
+Pre-descriptor manifest v2/v3 databases are migrated by writing manifest v4
+first and publishing `FORMAT` last. Thus the descriptor acts as the commit
+marker for the directory-wide upgrade. See [`docs/format.md`](./docs/format.md)
+for the compatibility and downgrade policy.
 
 ---
 
@@ -639,6 +682,9 @@ type LeafRecord struct {
     LowKey         []byte
     SegmentID      uint64
     SegmentVersion uint64
+    DictionaryGroupID uint64
+    Keys            uint64 // materialized keys in the referenced segment
+    AppliedSeq      uint64 // WAL coverage for this leaf
 }
 ```
 
@@ -652,7 +698,9 @@ of a freshly created empty leaf.
 ```
 header:  [magic "FMAN":4][format version:4]
 body:    [NextSegmentID:8][AppliedSeq:8][leaf count:4]
-         per leaf: [LeafID:8][SegmentID:8][SegmentVersion:8][low key length:4][low key]
+         per leaf: [LeafID:8][SegmentID:8][SegmentVersion:8][Keys:8]
+                   [AppliedSeq:8][DictionaryGroupID:8]
+                   [low key length:4][low key]
 trailer: [crc32:4]   // IEEE, over the body only
 ```
 
@@ -674,6 +722,9 @@ scale, this is the decision to revisit.
 
 - leaves are strictly ascending by low key
 - leaf ids are unique
+- non-zero segment ids are unique and below `NextSegmentID`
+- leaves without a segment have zero version and key count
+- global `AppliedSeq` equals the minimum per-leaf `AppliedSeq`
 - only the first leaf may carry an empty low key
 - a non-empty leaf set must start at the empty low key, so no part of the
   keyspace is left uncovered
@@ -703,9 +754,11 @@ func (db *DB) runMergeCycle() error {
 
 `mergeLeaves` merges only the leaves `Tree.PendingMerge` reports — those whose
 buffer crossed `MergeThresholdBytes`, plus any leaf whose previous merge failed
-after freezing its buffer — and then saves the manifest. It deliberately does not
-move the log watermark: only some leaves were merged, so the records for the
-others are still needed.
+after freezing its buffer. For each leaf it captures an exact WAL sequence under
+`applyMu`, freezes that leaf, and persists the sequence in the leaf record. The
+global watermark is the minimum of all leaf watermarks, so WAL records needed by
+other leaves remain available while recovery avoids replaying already merged
+non-idempotent increments.
 
 The first failure of a background merge is stored and surfaced on the next user
 call, so a broken merge cannot look like a healthy database that quietly stopped
@@ -723,7 +776,8 @@ merging.
    frozen operation iterator in lockstep, resolving Put, Delete, and Inc against
    the segment value
 4. Stream the result into output segments (see below)
-5. Persist the manifest, then install the result
+5. Store the exact per-leaf replay watermark
+6. Persist the manifest, then install the result
 
 The source segment iterator is consulted through `IterWithErr`. Without checking
 that accessor a single unreadable block would silently drop every remaining key,
@@ -769,9 +823,9 @@ expectedKeys := l.segmentKeys.Load() + l.buffer.FrozenLen()
 ```
 
 Sizing for the buffer alone, as the single-segment path used to, degrades the
-filter a little more with every merge. A leaf reopened from the manifest starts
-with `segmentKeys == 0` because the segment file does not record its key count,
-so the first merge after reopening sizes its filter from the buffer alone.
+filter a little more with every merge. The manifest records each segment's key
+count, so a reopened leaf restores the same sizing input even though the segment
+file itself does not store that count.
 
 ### Installing the Result
 
@@ -812,13 +866,17 @@ File: `pkg/oneleafdb/db.go`
 2. `tree.Open` reopens the segment of every leaf record that names one, rebuilds
    the leaf set in stored order, and continues leaf id allocation past the
    highest id it found
-3. Open the write-ahead log, which drops a torn trailing record if present
-4. Replay the log tail
+3. Reconcile canonical `.seg` and `.seg.tmp` files against the validated
+   manifest root set, removing only unreferenced outputs while holding the
+   exclusive database lock
+4. Open the write-ahead log, which drops a torn trailing record if present
+5. Replay the log tail
 
 ```go
 func (db *DB) replayWAL(path string, appliedSeq uint64) error {
     _, err := wal.Iterate(db.fs, path, func(record wal.Record) error {
-        if record.Seq <= appliedSeq {
+        if record.Seq <= appliedSeq ||
+           record.Seq <= db.tree.AppliedSeqForKey(record.Key) {
             return nil
         }
         switch record.Kind {
@@ -832,8 +890,9 @@ func (db *DB) replayWAL(path string, appliedSeq uint64) error {
 }
 ```
 
-Records at or below `AppliedSeq` are already durable in segments; replaying them
-would double every increment they contain.
+Records at or below global `AppliedSeq` are durable across every leaf. Records
+above it are checked against the destination leaf's watermark; replaying one
+already represented by that leaf's segment would double an increment.
 
 ### Checkpoints
 
@@ -845,15 +904,21 @@ past `WALCheckpointBytes`.
 func (db *DB) checkpoint() error {
     db.applyMu.Lock()
     watermark := db.walLastSeq()
+    checkpointDebt := db.walBytes.Swap(0)
     db.tree.FreezeAll()
     db.applyMu.Unlock()
 
-    if err := db.tree.MergeAll(); err != nil { /* ... */ }
+    committed := false
+    defer func() {
+        if !committed { db.walBytes.Add(checkpointDebt) }
+    }()
 
-    db.tree.SetAppliedSeq(watermark)
+    if err := db.tree.MergeAllThrough(watermark); err != nil { /* ... */ }
+
+    if err := db.tree.SetAppliedSeq(watermark); err != nil { /* ... */ }
     if err := db.tree.SaveManifest(); err != nil { /* ... */ }
     if err := db.walTruncate(watermark); err != nil { /* ... */ }
-    db.walBytes.Store(0)
+    committed = true
     return nil
 }
 ```
@@ -864,19 +929,28 @@ func (db *DB) checkpoint() error {
 across "append to log, apply to tree"; the checkpoint takes the write side just
 long enough to read the last sequence number and freeze every leaf buffer.
 
-That makes the recorded watermark exact: every operation at or below it is in the
-frozen set, and nothing above it is. A watermark that is behind the data would
-replay an increment a segment already contains and silently double it. Reading
-the sequence number and freezing must happen in the same excluded window —
-leaves created after the freeze are not covered, which is the other reason
-writers are held off across both steps.
+That makes each recorded leaf watermark exact: every operation for that range at
+or below it is in the frozen set, and nothing above it is. A watermark that is
+behind the data would replay an increment a segment already contains and
+silently double it. Reading the sequence number and freezing must happen in the
+same excluded window. A complete checkpoint applies one watermark to all leaves;
+an ordinary local merge uses the same barrier for only its selected leaf.
 
-`MergeAll` then merges every leaf that holds pending operations. It uses
+Before entering that barrier, live writes validate key/value limits. Operations
+for the same key then hold one of 4096 mutation locks across conditional type
+validation, WAL append, and tree application. This is required for `Inc`: a
+byte-valued key must be rejected before logging, and concurrent Put/Inc calls
+must have identical order in the live tree and in replay. The shard lock is not
+a global write lock; independent keys normally proceed concurrently.
+
+`MergeAllThrough` then merges every leaf that holds the frozen generation. It uses
 `PendingLen`, not `BufferedLen`: after `FreezeAll` the active layer is empty
 while the frozen operations still need writing, and a merge pass that concluded
-there was nothing to do would drop log records covering real data. The pass
-repeats at most four times, because a split moves buffered writes into leaves the
-pass has already visited.
+there was nothing to do would drop log records covering real data. The
+watermarked pass deliberately runs once: revisiting active writes that arrived
+after the barrier would place operations above the watermark in its segments and
+could double an `Inc` during WAL replay. The non-watermarked `MergeAll` helper
+may still use bounded repeat rounds when no exact snapshot boundary is claimed.
 
 ---
 
@@ -1151,7 +1225,8 @@ caller gets its own copy and the cache clones separately.
    - Bump only the key's shard counter
    - Delete the cached entry for the key
 
-5. Account for log growth and notify the merge worker
+5. Record foreground metrics and submit deduplicated scheduler work when merge
+   or WAL debt crosses its threshold
 ```
 
 Code path:

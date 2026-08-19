@@ -41,6 +41,7 @@ const (
 	recordKindPut    byte = 1
 	recordKindDelete byte = 2
 	recordKindInc    byte = 3
+	recordKindBatch  byte = 4
 )
 
 // crcTable is the Castagnoli crc32 table used for record and header checksums.
@@ -53,12 +54,16 @@ var crcTable = crc32.MakeTable(crc32.Castagnoli)
 var (
 	// ErrClosed is returned by operations on a closed WAL.
 	ErrClosed = errors.New("wal: closed")
-	// ErrRecordTooLarge is returned when a key or payload exceeds 4 GiB.
+	// ErrRecordTooLarge is returned when a key or payload exceeds the persisted
+	// format safety ceiling.
 	ErrRecordTooLarge = errors.New("wal: record too large")
 	// ErrInvalidOpKind is returned for an operation kind the log cannot encode.
 	ErrInvalidOpKind = errors.New("wal: invalid operation kind")
 	// ErrNoPath is returned when opening a WAL without a path.
 	ErrNoPath = errors.New("wal: empty path")
+	// ErrPersistence marks a terminal write/sync failure. The WAL handle must
+	// be closed and reopened before another mutation or checkpoint is attempted.
+	ErrPersistence = errors.New("wal: terminal persistence failure")
 
 	// ErrShortWALFile is returned when the file is too small to hold a header.
 	ErrShortWALFile = errors.New("wal: short wal file")
@@ -99,6 +104,13 @@ func encodeFileHeader(baseSeq uint64) []byte {
 	binary.LittleEndian.PutUint64(buf[8:16], baseSeq)
 	binary.LittleEndian.PutUint32(buf[16:20], crc32.Checksum(buf[:16], crcTable))
 	return buf
+}
+
+// EmptyFile returns a complete WAL image containing no records. It is used by
+// backup snapshots after all operations through baseSeq-1 have been persisted
+// in immutable segments.
+func EmptyFile(baseSeq uint64) []byte {
+	return encodeFileHeader(baseSeq)
 }
 
 func decodeFileHeader(buf []byte) (uint64, error) {
@@ -154,6 +166,8 @@ func recordKindOf(kind ops.OpKind) (byte, error) {
 		return recordKindDelete, nil
 	case ops.OpInc:
 		return recordKindInc, nil
+	case ops.OpBatch:
+		return recordKindBatch, nil
 	default:
 		return 0, ErrInvalidOpKind
 	}
@@ -167,6 +181,8 @@ func opKindOf(kind byte) (ops.OpKind, bool) {
 		return ops.OpDelete, true
 	case recordKindInc:
 		return ops.OpInc, true
+	case recordKindBatch:
+		return ops.OpBatch, true
 	default:
 		return 0, false
 	}

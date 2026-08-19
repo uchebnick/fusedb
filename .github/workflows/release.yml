@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Release gates
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25.13'
+        cache: true
+
+    - name: Install native LZ4 development library
+      run: sudo apt-get update && sudo apt-get install -y liblz4-dev
+
+    - name: Test production module
+      run: go test -race ./...
+
+    - name: Test crash recovery
+      run: make test-crash
+
+    - name: Check supply chain
+      run: make security
+
+  release:
+    name: Publish module evidence
+    needs: verify
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25.13'
+        cache: true
+
+    - name: Generate library SBOM and checksums
+      run: |
+        make sbom
+        sha256sum dist/* > dist/SHA256SUMS
+
+    - name: Publish GitHub release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

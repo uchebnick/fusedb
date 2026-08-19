@@ -11,11 +11,7 @@ import (
 	"github.com/uchebnick/fusedb/internal/value"
 )
 
-var (
-	benchValueSink []byte
-	benchBoolSink  bool
-	benchErrSink   error
-)
+var benchValueSink []byte
 
 func BenchmarkLeafGetActiveHit64K(b *testing.B) {
 	leaf := NewLeaf(1, 42, nil, &Merger{})

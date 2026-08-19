@@ -1,5 +1,9 @@
 # FuseDB Architecture
 
+> [!NOTE]
+> This is an early design note retained for historical context. The maintained
+> description of the implemented engine is [`ARCHITECTURE.md`](../ARCHITECTURE.md).
+
 ## Status
 
 FuseDB is an embedded KV engine in active development for small, hot mutable

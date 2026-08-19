@@ -13,6 +13,7 @@
 - [Реализация skiplist](#реализация-skiplist)
 - [Буфер листа](#буфер-листа)
 - [Write-Ahead Log](#write-ahead-log)
+- [Контроль формата директории](#контроль-формата-директории)
 - [Манифест](#манифест)
 - [Merge и split](#merge-и-split)
 - [Восстановление и checkpoints](#восстановление-и-checkpoints)
@@ -32,7 +33,8 @@ FuseDB разбивает пространство ключей на упоря�
 объём, переписываемый одним merge, ограничен размером листа, а не размером базы
 данных.
 
-Публичная точка входа — `pkg/oneleafdb` (`DB`, `OpenDB`).
+Поддерживаемая публичная точка входа — `pkg/fusedb` (`DB`, `Open`).
+`pkg/oneleafdb` — внутренний движок за этим фасадом, а не стабильный API.
 
 ### Основные компоненты
 
@@ -67,6 +69,19 @@ Append-only лог из пронумерованных записей с кон�
 **Компрессия** (`internal/compression`)
 Опциональная словарная LZ4-компрессия с персистентным реестром. Словари обучаются
 оффлайн на репрезентативных сэмплах и хранятся как `.zdict` файлы.
+
+**Фоновый планировщик** (`internal/scheduler`, `internal/metrics`)
+Адаптивно допускает merge, checkpoint и будущие dictionary jobs. Он изучает
+профиль foreground-нагрузки, защищает p95/p99 через hysteresis, учитывает запас
+ресурсов и прерывает cooperative optional work при возвращении нагрузки. Детали:
+[`docs/scheduler.md`](./docs/scheduler.md).
+
+**Observability adapter** (`pkg/fusedb/prometheus`)
+Опциональный custom collector поверх иммутабельных health, metrics, statistics
+и format snapshots. Во время scrape он не выполняет storage I/O, использует
+только фиксированные перечисления labels и оставляет lifecycle регистрации
+встраивающему приложению. Prometheus rules и Grafana dashboard находятся в
+`monitoring`.
 
 **Кэш** (`pkg/oneleafdb/cache.go`)
 Map-based кэш значений с шардированной инвалидацией по эпохам. Вытесняет
@@ -565,6 +580,10 @@ Kind равен 1 (put), 2 (delete) или 3 (inc). Значения начин�
 это важно, потому что лог считает контрольную сумму для каждой мутации на пути
 записи.
 
+Длины ключа и payload сверяются с лимитами format epoch 2 до выделения body.
+Live write-path использует те же границы, поэтому writer не может создать
+запись, которую recovery-reader затем отвергнет.
+
 Путь в коде: `appendRecord`.
 
 ### Групповой коммит
@@ -603,6 +622,12 @@ func (w *WAL) run() {
 при явном `Sync` или при `Close`.
 **Sync (`SyncWrites`):** `Append` запрашивает сброс и ждёт его.
 
+Любая ошибка записи или sync WAL фиксируется как terminal `ErrPersistence`.
+Partial write и ошибка sync дополнительно оборачивают
+`disk.ErrCommitUncertain`. WAL отвергает последующие append, а база не делает
+checkpoint с poisoned sequence; reopen либо отбрасывает неполный хвост, либо
+ровно один раз replay-ит полную запись.
+
 ### Чтение и восстановление
 
 `Cursor`, `Iterate` и `ReadAll` проходят лог с начала. Курсор останавливается на
@@ -616,7 +641,8 @@ func (w *WAL) run() {
 
 `Open` выполняет этот проход первым делом. Оборванный хвост физически отбрасывается
 переписыванием файла, поэтому оставшиеся байты прерванной записи никогда не будут
-приняты за запись на следующем проходе.
+приняты за запись на следующем проходе. Корректный префикс копируется небольшими
+чанками: открытие большого WAL не материализует весь файл в памяти.
 
 ### Усечение
 
@@ -624,7 +650,26 @@ func (w *WAL) run() {
 переписываются в новый файл, заголовок которого объявляет `baseSeq = upToSeq+1`.
 Замена устанавливается через временный файл, атомарное переименование и
 синхронизацию директории, поэтому авария в любой момент оставляет на месте либо
-старый, либо новый — но целый — лог.
+старый, либо новый — но целый — лог. Уцелевшие записи потоково переносятся по
+одной, поэтому память rotation ограничена одной WAL-записью, а не размером лога.
+
+---
+
+## Контроль формата директории
+
+Файл: `internal/dbformat/format.go`
+
+Каждая текущая директория базы содержит фиксированный checksummed-файл
+`FORMAT`. В нём объявлены epoch хранилища, минимальные reader/writer epochs и
+маски обязательных и опциональных features. `Open` проверяет его до открытия
+изменяемых registry и перезаписи metadata. Более новый epoch или неизвестный
+обязательный feature приводят к раннему отказу; неизвестные опциональные
+features можно игнорировать.
+
+Базы без descriptor с manifest v2/v3 мигрируют так: сначала записывается
+manifest v4, а `FORMAT` публикуется последним и служит commit marker всего
+upgrade. Политика совместимости и downgrade описана в
+[`docs/format.md`](./docs/format.md).
 
 ---
 
@@ -648,6 +693,9 @@ type LeafRecord struct {
     LowKey         []byte
     SegmentID      uint64
     SegmentVersion uint64
+    DictionaryGroupID uint64
+    Keys            uint64 // число ключей в сегменте
+    AppliedSeq      uint64 // WAL watermark этого листа
 }
 ```
 
@@ -661,7 +709,9 @@ type LeafRecord struct {
 ```
 header:  [magic "FMAN":4][format version:4]
 body:    [NextSegmentID:8][AppliedSeq:8][leaf count:4]
-         на лист: [LeafID:8][SegmentID:8][SegmentVersion:8][low key length:4][low key]
+         на лист: [LeafID:8][SegmentID:8][SegmentVersion:8][Keys:8]
+                  [AppliedSeq:8][DictionaryGroupID:8]
+                  [low key length:4][low key]
 trailer: [crc32:4]   // IEEE, over the body only
 ```
 
@@ -825,13 +875,16 @@ reader и удаляет файл по истечении TTL в 2s, прове�
 2. `tree.Open` переоткрывает сегмент каждой записи о листе, где сегмент указан,
    пересобирает множество листьев в сохранённом порядке и продолжает выделение
    идентификаторов листьев после максимального найденного
-3. Открыть write-ahead log, что отбрасывает оборванную последнюю запись, если она есть
-4. Воспроизвести хвост лога
+3. Сверить канонические `.seg` и `.seg.tmp` с validated root set manifest и под
+   эксклюзивным lock удалить только outputs без ссылок
+4. Открыть write-ahead log, что отбрасывает оборванную последнюю запись, если она есть
+5. Воспроизвести хвост лога
 
 ```go
 func (db *DB) replayWAL(path string, appliedSeq uint64) error {
     _, err := wal.Iterate(db.fs, path, func(record wal.Record) error {
-        if record.Seq <= appliedSeq {
+        if record.Seq <= appliedSeq ||
+           record.Seq <= db.tree.AppliedSeqForKey(record.Key) {
             return nil
         }
         switch record.Kind {
@@ -845,8 +898,9 @@ func (db *DB) replayWAL(path string, appliedSeq uint64) error {
 }
 ```
 
-Записи с номером не выше `AppliedSeq` уже durable в сегментах; их воспроизведение
-удвоило бы каждый содержащийся в них инкремент.
+Записи не выше глобального `AppliedSeq` уже durable во всех листьях. Для более
+новых записей recovery сверяется с watermark целевого листа: локальный merge не
+должен приводить к повторному применению уже материализованного `Inc`.
 
 ### Checkpoints
 
@@ -858,15 +912,21 @@ Checkpoint — это то, что двигает watermark и позволяе�
 func (db *DB) checkpoint() error {
     db.applyMu.Lock()
     watermark := db.walLastSeq()
+    checkpointDebt := db.walBytes.Swap(0)
     db.tree.FreezeAll()
     db.applyMu.Unlock()
 
-    if err := db.tree.MergeAll(); err != nil { /* ... */ }
+    committed := false
+    defer func() {
+        if !committed { db.walBytes.Add(checkpointDebt) }
+    }()
 
-    db.tree.SetAppliedSeq(watermark)
+    if err := db.tree.MergeAllThrough(watermark); err != nil { /* ... */ }
+
+    if err := db.tree.SetAppliedSeq(watermark); err != nil { /* ... */ }
     if err := db.tree.SaveManifest(); err != nil { /* ... */ }
     if err := db.walTruncate(watermark); err != nil { /* ... */ }
-    db.walBytes.Store(0)
+    committed = true
     return nil
 }
 ```
@@ -885,12 +945,20 @@ checkpoint берёт write-сторону ровно настолько, что
 взаимного исключения — листья, созданные после заморозки, не покрыты, и это вторая
 причина, по которой писатели удерживаются на обоих шагах.
 
-Далее `MergeAll` мерджит каждый лист, у которого есть отложенные операции. Он
+До входа в барьер write-path проверяет лимиты ключа и значения. Операции одного
+ключа затем удерживают один из 4096 mutation-lock на всём пути «type validation
+→ WAL append → tree apply». Поэтому `Inc` над byte-value отклоняется до WAL, а
+конкурентные Put/Inc имеют одинаковый порядок в live tree и при replay. Это не
+глобальный write-lock: независимые ключи обычно продолжают выполняться параллельно.
+
+Далее `MergeAllThrough` мерджит frozen-generation каждого листа. Он
 использует `PendingLen`, а не `BufferedLen`: после `FreezeAll` активный слой пуст,
 тогда как замороженные операции ещё нужно записать, и проход merge, решивший, что
-делать нечего, отбросил бы записи лога, покрывающие реальные данные. Проход
-повторяется не более четырёх раз, потому что split переносит буферизованные записи в
-листья, которые проход уже посетил.
+делать нечего, отбросил бы записи лога, покрывающие реальные данные. Проход с
+watermark намеренно выполняется ровно один раз: повторный раунд захватил бы active-
+записи, пришедшие после барьера, и мог бы удвоить `Inc` при WAL replay. Обычный
+`MergeAll` без точной snapshot-границы всё ещё может делать ограниченное число
+повторных раундов.
 
 ---
 
@@ -1165,7 +1233,8 @@ func (db *DB) Get(key []byte) ([]byte, bool, error) {
    - Увеличить счётчик только для шарда этого ключа
    - Удалить закэшированную запись для ключа
 
-5. Учесть рост лога и уведомить merge-воркер
+5. Записать foreground-метрики и поставить дедуплицированную задачу планировщика,
+   когда merge- или WAL-долг пересёк порог
 ```
 
 Путь в коде:

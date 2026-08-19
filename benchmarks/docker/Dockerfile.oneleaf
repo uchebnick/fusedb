@@ -1,19 +1,20 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.25.13-alpine AS builder
 
 WORKDIR /build
 
 # Install build dependencies
 RUN apk add --no-cache gcc musl-dev lz4-dev
 
-# Copy go mod files
+# Copy both module files so the benchmark module can resolve its parent.
 COPY go.mod go.sum ./
-RUN go mod download
+COPY benchmarks/go.mod benchmarks/go.sum ./benchmarks/
+RUN cd benchmarks && go mod download
 
 # Copy source code
 COPY . .
 
 # Build the server
-RUN CGO_ENABLED=1 go build -o benchmark-server ./cmd/benchmark-server
+RUN cd benchmarks && CGO_ENABLED=1 go build -o /build/benchmark-server ./cmd/benchmark-server
 
 FROM alpine:latest
 

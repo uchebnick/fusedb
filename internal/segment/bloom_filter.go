@@ -8,6 +8,7 @@ import (
 	"math"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/uchebnick/fusedb/internal/limits"
 )
 
 const (
@@ -47,7 +48,7 @@ func NewBloomFilter(expectedKeys int, falsePositiveRate float64) (BloomFilter, e
 	if falsePositiveRate <= 0 || falsePositiveRate >= 1 {
 		return BloomFilter{}, ErrInvalidBloomFilterRate
 	}
-	if expectedKeys < 0 || expectedKeys > math.MaxInt32 {
+	if expectedKeys < 0 || expectedKeys > limits.MaxSegmentKeys {
 		return BloomFilter{}, ErrTooManyBloomFilterKeys
 	}
 	if expectedKeys == 0 {
@@ -208,6 +209,9 @@ func EncodeBloomFilter(filter BloomFilter) ([]byte, error) {
 
 // DecodeBloomFilter decodes bloom filter from bytes.
 func DecodeBloomFilter(data []byte) (BloomFilter, error) {
+	if len(data) > limits.MaxSegmentMetadataBytes {
+		return BloomFilter{}, ErrCorruptBloomFilterData
+	}
 	if len(data) < bloomFilterHeaderSize+bloomFilterChecksumSize {
 		return BloomFilter{}, ErrShortBloomFilterBuffer
 	}
@@ -221,8 +225,16 @@ func DecodeBloomFilter(data []byte) (BloomFilter, error) {
 	}
 
 	numBits := binary.LittleEndian.Uint32(data[8:12])
-	numHashes := uint8(binary.LittleEndian.Uint32(data[12:16]))
-	bitsetLen := int(binary.LittleEndian.Uint32(data[16:20]))
+	numHashesRaw := binary.LittleEndian.Uint32(data[12:16])
+	if numHashesRaw == 0 || numHashesRaw > maxBloomFilterHashes {
+		return BloomFilter{}, ErrCorruptBloomFilterData
+	}
+	numHashes := uint8(numHashesRaw)
+	bitsetLen64 := uint64(binary.LittleEndian.Uint32(data[16:20]))
+	if bitsetLen64 == 0 || bitsetLen64 > limits.MaxSegmentMetadataBytes {
+		return BloomFilter{}, ErrCorruptBloomFilterData
+	}
+	bitsetLen := int(bitsetLen64)
 
 	if bitsetLen <= 0 {
 		return BloomFilter{}, ErrCorruptBloomFilterData

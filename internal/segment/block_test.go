@@ -2,8 +2,26 @@ package segment
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"testing"
 )
+
+func TestDecodersRejectImpossibleCountsBeforeAllocation(t *testing.T) {
+	block := make([]byte, rawBlockHeaderSize+rawBlockChecksumSize)
+	copy(block[:4], rawBlockMagic)
+	binary.LittleEndian.PutUint32(block[4:8], rawBlockVersion)
+	binary.LittleEndian.PutUint32(block[8:12], ^uint32(0))
+	if _, err := NewBlockView(block); !errors.Is(err, ErrCorruptBlockOffsets) {
+		t.Fatalf("block error = %v, want ErrCorruptBlockOffsets", err)
+	}
+
+	index := make([]byte, indexHeaderSize)
+	binary.LittleEndian.PutUint32(index, ^uint32(0))
+	if _, err := DecodeIndex(index); !errors.Is(err, ErrCorruptIndex) {
+		t.Fatalf("index error = %v, want ErrCorruptIndex", err)
+	}
+}
 
 func TestBlockRawRoundTrip(t *testing.T) {
 	block, err := NewBlock([]BlockEntry{
@@ -89,4 +107,37 @@ func TestEncodeBlocksBuildsIndex(t *testing.T) {
 	if !bytes.Equal(value, []byte("tenant=b|region=us|kind=session|state=active|user=4|bucket=2")) {
 		t.Fatalf("z value = %q", value)
 	}
+}
+
+func FuzzSegmentMetadataDecodersNeverPanic(f *testing.F) {
+	validBlock, err := NewBlock([]BlockEntry{{Key: []byte("key"), Value: []byte("value")}})
+	if err != nil {
+		f.Fatal(err)
+	}
+	encodedBlock, err := validBlock.MarshalBinary()
+	if err != nil {
+		f.Fatal(err)
+	}
+	validIndex, err := NewIndex([]BlockIndexEntry{{Separator: []byte("key"), Offset: 0, Length: uint32(len(encodedBlock))}})
+	if err != nil {
+		f.Fatal(err)
+	}
+	encodedIndex, err := validIndex.MarshalBinary()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(encodedBlock)
+	f.Add(encodedIndex)
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 1<<20 {
+			t.Skip()
+		}
+		_, _ = NewBlockView(data)
+		_, _ = DecodeBlock(data)
+		_, _ = DecodeIndex(data)
+		_, _ = DecodeBloomFilter(data)
+		_, _ = DecodeHeader(data)
+		_, _ = DecodeFooter(data)
+	})
 }

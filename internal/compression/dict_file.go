@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/limits"
 )
 
 const (
@@ -41,7 +42,7 @@ func SaveDictionary(fs disk.FS, name string, dict *Dictionary) error {
 
 // LoadDictionary reads one dictionary version from a file.
 func LoadDictionary(fs disk.FS, name string) (*Dictionary, error) {
-	data, err := disk.ReadFile(fs, name)
+	data, err := disk.ReadFileLimited(fs, name, dictionaryHeaderSize+limits.MaxDictionaryBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -81,10 +82,18 @@ func DecodeDictionary(data []byte) (*Dictionary, error) {
 	}
 
 	dictID := binary.LittleEndian.Uint32(data[8:12])
-	level := int(binary.LittleEndian.Uint32(data[12:16]))
-	rawLen := int(binary.LittleEndian.Uint32(data[16:20]))
+	levelRaw := binary.LittleEndian.Uint32(data[12:16])
+	if levelRaw > MaxLZ4Acceleration {
+		return nil, ErrInvalidAcceleration
+	}
+	level := int(levelRaw)
+	rawLen64 := uint64(binary.LittleEndian.Uint32(data[16:20]))
 	checksum := binary.LittleEndian.Uint32(data[20:24])
 
+	if rawLen64 > limits.MaxDictionaryBytes {
+		return nil, ErrDictionaryTooLarge
+	}
+	rawLen := int(rawLen64)
 	if len(data) < dictionaryHeaderSize+rawLen {
 		return nil, ErrShortDictionaryFile
 	}

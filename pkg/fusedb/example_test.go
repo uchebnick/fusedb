@@ -2,98 +2,135 @@ package fusedb_test
 
 import (
 	"fmt"
-	"log"
+	"os"
 
 	"github.com/uchebnick/fusedb/pkg/fusedb"
 )
 
 func Example() {
-	// Open database
-	db, err := fusedb.Open(fusedb.Options{
-		Dir:       "/tmp/example-db",
-		CacheSize: 5 << 20, // 5MB
-		MergeSize: 5 << 20, // 5MB
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
+	db, cleanup := openExampleDB()
+	defer cleanup()
 
-	// Put a value
 	if err := db.Put([]byte("user:1:name"), []byte("Alice")); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-
-	// Get a value
-	value, found, err := db.Get([]byte("user:1:name"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	if found {
-		fmt.Printf("Name: %s\n", value)
-	}
-
-	// Increment a counter
 	if err := db.Inc([]byte("user:1:visits"), 1); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
-	// Delete a key
-	if err := db.Delete([]byte("user:1:name")); err != nil {
-		log.Fatal(err)
+	name, found, err := db.Get([]byte("user:1:name"))
+	if err != nil {
+		panic(err)
+	}
+	visits, _, err := db.GetInt64([]byte("user:1:visits"))
+	if err != nil {
+		panic(err)
 	}
 
-	// Check stats
-	stats := db.Stats()
-	fmt.Printf("Buffered: %d bytes\n", stats.BufferedBytes)
+	fmt.Printf("name=%s found=%v visits=%d\n", name, found, visits)
+	// Output: name=Alice found=true visits=1
 }
 
 func ExampleDB_Put() {
-	db, _ := fusedb.Open(fusedb.Options{Dir: "/tmp/db"})
-	defer func() { _ = db.Close() }()
+	db, cleanup := openExampleDB()
+	defer cleanup()
 
-	err := db.Put([]byte("key"), []byte("value"))
-	if err != nil {
-		log.Fatal(err)
+	if err := db.Put([]byte("key"), []byte("value")); err != nil {
+		panic(err)
 	}
 }
 
 func ExampleDB_Get() {
-	db, _ := fusedb.Open(fusedb.Options{Dir: "/tmp/db"})
-	defer func() { _ = db.Close() }()
+	db, cleanup := openExampleDB()
+	defer cleanup()
 
+	if err := db.Put([]byte("key"), []byte("value")); err != nil {
+		panic(err)
+	}
 	value, found, err := db.Get([]byte("key"))
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	if found {
-		fmt.Printf("Value: %s\n", value)
-	} else {
-		fmt.Println("Key not found")
-	}
+	fmt.Printf("value=%s found=%v\n", value, found)
+	// Output: value=value found=true
 }
 
 func ExampleDB_Inc() {
-	db, _ := fusedb.Open(fusedb.Options{Dir: "/tmp/db"})
-	defer func() { _ = db.Close() }()
+	db, cleanup := openExampleDB()
+	defer cleanup()
 
-	// Increment counter
-	if err := db.Inc([]byte("page:views"), 1); err != nil {
-		log.Fatal(err)
+	if err := db.Inc([]byte("page:views"), 2); err != nil {
+		panic(err)
 	}
-
-	// Decrement counter
 	if err := db.Inc([]byte("page:views"), -1); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
+	count, found, err := db.GetInt64([]byte("page:views"))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("count=%d found=%v\n", count, found)
+	// Output: count=1 found=true
 }
 
 func ExampleDB_Delete() {
-	db, _ := fusedb.Open(fusedb.Options{Dir: "/tmp/db"})
-	defer func() { _ = db.Close() }()
+	db, cleanup := openExampleDB()
+	defer cleanup()
 
-	err := db.Delete([]byte("key"))
+	if err := db.Put([]byte("key"), []byte("value")); err != nil {
+		panic(err)
+	}
+	if err := db.Delete([]byte("key")); err != nil {
+		panic(err)
+	}
+	_, found, err := db.Get([]byte("key"))
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
+	}
+	fmt.Printf("found=%v\n", found)
+	// Output: found=false
+}
+
+func ExampleDB_ApplyOnce() {
+	db, cleanup := openExampleDB()
+	defer cleanup()
+
+	mutations := []fusedb.Mutation{
+		fusedb.PutMutation([]byte("purchase/order-991"), []byte("paid")),
+		fusedb.IncMutation([]byte("tickets/show-55/sold"), 3),
+	}
+	first, err := db.ApplyOnce([]byte("event/order-991-paid"), mutations)
+	if err != nil {
+		panic(err)
+	}
+	retry, err := db.ApplyOnce([]byte("event/order-991-paid"), mutations)
+	if err != nil {
+		panic(err)
+	}
+	count, _, err := db.GetInt64([]byte("tickets/show-55/sold"))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("first=%v retry=%v tickets=%d\n", first, retry, count)
+	// Output: first=true retry=false tickets=3
+}
+
+func openExampleDB() (*fusedb.DB, func()) {
+	dir, err := os.MkdirTemp("", "fusedb-example-")
+	if err != nil {
+		panic(err)
+	}
+	db, err := fusedb.Open(fusedb.Options{Dir: dir})
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		panic(err)
+	}
+	return db, func() {
+		if err := db.Close(); err != nil {
+			panic(err)
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			panic(err)
+		}
 	}
 }

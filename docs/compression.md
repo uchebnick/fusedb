@@ -1,5 +1,10 @@
 # FuseDB Compression
 
+> [!NOTE]
+> This document records compression research and rejected alternatives. For the
+> compression path implemented today, start with
+> [`ARCHITECTURE.md`](../ARCHITECTURE.md#compression-system).
+
 ## 1. Purpose
 
 This document describes compression strategies considered for FuseDB segments and blocks.
@@ -736,18 +741,29 @@ Only do this after:
 
 ## 10. Current Recommendation
 
-For FuseDB near term:
+### Implemented runtime path
 
-- keep compression as a pure byte codec module
-- compress whole blocks, not whole segments
-- keep file IO in `disk`
-- keep block and index logic in `segment`
-- start with either:
-  - no compression
-  - one global `LZ4Dict4KB` dictionary
+FuseDB now implements Phase 2 for contiguous leaf groups. Segment merge forks
+bounded raw encoded-block samples before compression. A single adaptive
+scheduler admits a cooperatively cancellable candidate trainer only after a
+stable quiet window, then evaluates on disjoint held-out blocks. Dictionary IDs
+are reserved durably, winners are persisted and atomically published through a
+checksummed group catalog, and manifest v4 keeps group assignment across
+restart. Existing segment headers continue to name their exact immutable
+dictionary version.
 
-If the global dictionary later proves too coarse:
+The current trainer uses a bounded frequent-chunk LZ4 history so cancellation
+is honest; it does not call the monolithic `BuildRawDict` path. Samples are
+memory-only. Old dictionary versions are reclaimed by a bounded scheduler job
+only after an exact scan proves that neither the active group catalog nor a
+current segment header references the ID. Hierarchical promotion remains
+future work.
 
-- move to one dictionary per leaf-group
+The selected near-term design is one dictionary per bounded contiguous leaf
+group. It gives materially better locality than one database-wide dictionary
+without introducing the metadata and garbage-collection complexity of a full
+hierarchical dictionary tree. Compression stays a pure block codec, filesystem
+IO stays behind `disk`, and segments retain exact immutable dictionary IDs.
 
-Adaptive hierarchical dictionaries are a plausible future direction, but they should be introduced only after the engine core is stable and measurable.
+Adaptive hierarchical dictionaries remain a possible later extension, after
+the group design has production measurements.

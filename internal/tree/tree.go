@@ -35,7 +35,8 @@ const (
 
 	// DefaultMergeThresholdBytes is the buffered payload size at which a leaf
 	// becomes a merge candidate.
-	DefaultMergeThresholdBytes = 8 << 20
+	DefaultMergeThresholdBytes   = 8 << 20
+	DefaultDictionaryGroupLeaves = 8
 )
 
 var (
@@ -84,11 +85,14 @@ type Options struct {
 	// up in PendingMerge. Zero uses DefaultMergeThresholdBytes.
 	MergeThresholdBytes int64
 
-	TargetBlockSize    int
-	BloomFalsePositive float64
-	Compression        segment.CompressionKind
-	Dictionary         *compression.Dictionary
-	Registry           *compression.Registry
+	TargetBlockSize         int
+	BloomFalsePositive      float64
+	Compression             segment.CompressionKind
+	Dictionary              *compression.Dictionary
+	DictionaryForGroup      func(groupID uint64) (*compression.Dictionary, error)
+	DictionaryGroupLeaves   int
+	ObserveDictionarySample func(groupID uint64, raw []byte)
+	Registry                *compression.Registry
 }
 
 // Tree is the ordered leaf set of one database directory.
@@ -96,15 +100,18 @@ type Tree struct {
 	fs  disk.FS
 	dir string
 
-	seed                uint64
-	maxLeafBytes        int64
-	mergeThresholdBytes int64
-	targetBlockSize     int
-	bloomFalsePositive  float64
-	compression         segment.CompressionKind
-	dictionary          *compression.Dictionary
-	registry            *compression.Registry
-	merger              *leaf.Merger
+	seed                    uint64
+	maxLeafBytes            int64
+	mergeThresholdBytes     int64
+	targetBlockSize         int
+	bloomFalsePositive      float64
+	compression             segment.CompressionKind
+	dictionary              *compression.Dictionary
+	dictionaryForGroup      func(groupID uint64) (*compression.Dictionary, error)
+	dictionaryGroupLeaves   int
+	observeDictionarySample func(groupID uint64, raw []byte)
+	registry                *compression.Registry
+	merger                  *leaf.Merger
 
 	// leaves is the published snapshot, sorted by low key and replaced whole on
 	// every structural change.
@@ -229,23 +236,30 @@ func newTree(opts Options) (*Tree, error) {
 	if mergeThreshold <= 0 {
 		mergeThreshold = DefaultMergeThresholdBytes
 	}
+	groupLeaves := opts.DictionaryGroupLeaves
+	if groupLeaves <= 0 {
+		groupLeaves = DefaultDictionaryGroupLeaves
+	}
 
 	t := &Tree{
-		fs:                  opts.FS,
-		dir:                 opts.Dir,
-		seed:                opts.Seed,
-		maxLeafBytes:        maxLeafBytes,
-		mergeThresholdBytes: mergeThreshold,
-		targetBlockSize:     opts.TargetBlockSize,
-		bloomFalsePositive:  opts.BloomFalsePositive,
-		compression:         opts.Compression,
-		dictionary:          opts.Dictionary,
-		registry:            opts.Registry,
-		nextLeafID:          1,
-		retryMerge:          make(map[uint64]struct{}),
-		retired:             make(chan retiredReader, retiredReaderBufSize),
-		retireStop:          make(chan struct{}),
-		retireDone:          make(chan struct{}),
+		fs:                      opts.FS,
+		dir:                     opts.Dir,
+		seed:                    opts.Seed,
+		maxLeafBytes:            maxLeafBytes,
+		mergeThresholdBytes:     mergeThreshold,
+		targetBlockSize:         opts.TargetBlockSize,
+		bloomFalsePositive:      opts.BloomFalsePositive,
+		compression:             opts.Compression,
+		dictionary:              opts.Dictionary,
+		dictionaryForGroup:      opts.DictionaryForGroup,
+		dictionaryGroupLeaves:   groupLeaves,
+		observeDictionarySample: opts.ObserveDictionarySample,
+		registry:                opts.Registry,
+		nextLeafID:              1,
+		retryMerge:              make(map[uint64]struct{}),
+		retired:                 make(chan retiredReader, retiredReaderBufSize),
+		retireStop:              make(chan struct{}),
+		retireDone:              make(chan struct{}),
 	}
 	t.merger = &leaf.Merger{
 		TargetBlockSize:    opts.TargetBlockSize,
@@ -334,6 +348,16 @@ func (t *Tree) Inc(key []byte, delta int64) error {
 // split has just retired, so a lookup that saw a different generation before
 // and after simply looks again.
 func (t *Tree) Get(key []byte) ([]byte, bool, error) {
+	return t.get(key, false)
+}
+
+// GetEncoded returns a borrowed internal value including its kind tag. It is
+// for mutation admission inside the engine; public reads must use Get.
+func (t *Tree) GetEncoded(key []byte) ([]byte, bool, error) {
+	return t.get(key, true)
+}
+
+func (t *Tree) get(key []byte, encoded bool) ([]byte, bool, error) {
 	if t.closed.Load() {
 		return nil, false, ErrClosed
 	}
@@ -351,7 +375,14 @@ func (t *Tree) Get(key []byte) ([]byte, bool, error) {
 		if target == nil {
 			return nil, false, ErrNoLeaf
 		}
-		value, ok, err := target.Get(key)
+		var value []byte
+		var ok bool
+		var err error
+		if encoded {
+			value, ok, err = target.GetEncoded(key)
+		} else {
+			value, ok, err = target.Get(key)
+		}
 		if t.gen.Load() == gen {
 			if err != nil {
 				return nil, false, err
@@ -401,14 +432,25 @@ func (t *Tree) BufferedBytes() int64 {
 	return total
 }
 
-// SetAppliedSeq records the log position that merged segments already cover.
-//
+// SetAppliedSeq records the log position that every leaf already covers.
 // It only updates memory; the value reaches disk with the next SaveManifest.
-func (t *Tree) SetAppliedSeq(seq uint64) {
+func (t *Tree) SetAppliedSeq(seq uint64) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	t.manifest.AppliedSeq = seq
+	return t.manifest.SetAllAppliedSeq(seq)
+}
+
+// AppliedSeqForKey returns the replay watermark of the leaf currently owning
+// key.
+func (t *Tree) AppliedSeqForKey(key []byte) uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	record, _, ok := t.manifest.FindLeaf(key)
+	if !ok {
+		return 0
+	}
+	return record.AppliedSeq
 }
 
 // SaveManifest writes the current catalog to disk.

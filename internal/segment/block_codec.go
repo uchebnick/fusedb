@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"math"
+
+	"github.com/uchebnick/fusedb/internal/limits"
 )
 
 const (
@@ -117,6 +119,9 @@ func DecodeBlockUnsafe(data []byte) (Block, error) {
 
 // NewBlockView validates an encoded block and returns a zero-copy lookup view.
 func NewBlockView(data []byte) (BlockView, error) {
+	if len(data) > limits.MaxEncodedBlockBytes {
+		return BlockView{}, ErrBlockTooLarge
+	}
 	if len(data) < rawBlockHeaderSize+rawBlockChecksumSize {
 		return BlockView{}, ErrShortBlockBuffer
 	}
@@ -129,7 +134,11 @@ func NewBlockView(data []byte) (BlockView, error) {
 		return BlockView{}, fmt.Errorf("%w: %d", ErrUnsupportedBlockVersion, version)
 	}
 
-	entryCount := int(binary.LittleEndian.Uint32(data[8:12]))
+	entryCount64 := uint64(binary.LittleEndian.Uint32(data[8:12]))
+	if entryCount64 > uint64((len(data)-rawBlockHeaderSize-rawBlockChecksumSize)/4) {
+		return BlockView{}, ErrCorruptBlockOffsets
+	}
+	entryCount := int(entryCount64)
 	offsetsSize := entryCount * 4
 	if len(data) < rawBlockHeaderSize+offsetsSize+rawBlockChecksumSize {
 		return BlockView{}, ErrShortBlockBuffer
@@ -186,14 +195,18 @@ func decodeBlockEntryAt(data []byte, offset, next, offsetsPos int) (BlockEntry, 
 	}
 
 	pos := offset
-	keyLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+	keyLen64 := uint64(binary.LittleEndian.Uint32(data[pos : pos+4]))
 	pos += 4
-	valueLen := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+	valueLen64 := uint64(binary.LittleEndian.Uint32(data[pos : pos+4]))
 	pos += 4
 
-	if pos+keyLen+valueLen != next {
+	remaining := uint64(next - pos)
+	if keyLen64 > limits.MaxKeyBytes || valueLen64 > limits.MaxEncodedValueBytes ||
+		keyLen64 > remaining || valueLen64 != remaining-keyLen64 {
 		return BlockEntry{}, ErrShortBlockBuffer
 	}
+	keyLen := int(keyLen64)
+	valueLen := int(valueLen64)
 
 	key := data[pos : pos+keyLen]
 	pos += keyLen

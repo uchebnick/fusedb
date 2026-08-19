@@ -90,7 +90,7 @@ type compressionSpeedRow struct {
 	allocs  string
 }
 
-// Run with: GENERATE_BENCHMARKS=1 go test ./benchmarks/oneleafdb -run TestGenerateBenchmarksMD -v
+// Run from benchmarks/: GENERATE_BENCHMARKS=1 go test ./oneleafdb -run TestGenerateBenchmarksMD -v
 func TestGenerateBenchmarksMD(t *testing.T) {
 	if os.Getenv("GENERATE_BENCHMARKS") != "1" {
 		t.Skip("set GENERATE_BENCHMARKS=1 to auto-generate benchmarks.md")

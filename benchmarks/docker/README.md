@@ -212,8 +212,8 @@ DB operation
 
 The old system is still available in:
 - `docker-compose.yml` (HTTP servers + Prometheus + Grafana)
-- `cmd/benchmark-server/` (HTTP server)
-- `cmd/loadgen/` (HTTP load generator)
+- `benchmarks/cmd/benchmark-server/` (HTTP server)
+- `benchmarks/cmd/loadgen/` (HTTP load generator)
 
 Use it if you need:
 - Real-time monitoring with Grafana

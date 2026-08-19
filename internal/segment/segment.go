@@ -18,6 +18,7 @@ type Segment struct {
 	targetBlockSize int
 	compression     CompressionKind
 	dictionary      *compression.Dictionary
+	observeRawBlock func(raw []byte)
 	fs              disk.FS
 	file            disk.File
 	path            string

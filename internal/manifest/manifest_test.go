@@ -16,11 +16,11 @@ func sampleManifest() *Manifest {
 		NextSegmentID: 42,
 		AppliedSeq:    1337,
 		Leaves: []LeafRecord{
-			{LeafID: 1, LowKey: nil, SegmentID: 7, SegmentVersion: 3},
-			{LeafID: 2, LowKey: []byte{0x00}, SegmentID: 0, SegmentVersion: 0},
-			{LeafID: 3, LowKey: []byte{0x00, 0xff, 0x00, 'k', 0x00}, SegmentID: 9, SegmentVersion: 1},
-			{LeafID: 4, LowKey: []byte("user:0001"), SegmentID: 11, SegmentVersion: 2},
-			{LeafID: 5, LowKey: bytes.Repeat([]byte{0xff}, 300), SegmentID: 12, SegmentVersion: 8},
+			{LeafID: 1, LowKey: nil, SegmentID: 7, SegmentVersion: 3, AppliedSeq: 1337, DictionaryGroupID: 4},
+			{LeafID: 2, LowKey: []byte{0x00}, SegmentID: 0, SegmentVersion: 0, AppliedSeq: 1337},
+			{LeafID: 3, LowKey: []byte{0x00, 0xff, 0x00, 'k', 0x00}, SegmentID: 9, SegmentVersion: 1, AppliedSeq: 1337},
+			{LeafID: 4, LowKey: []byte("user:0001"), SegmentID: 11, SegmentVersion: 2, AppliedSeq: 1337},
+			{LeafID: 5, LowKey: bytes.Repeat([]byte{0xff}, 300), SegmentID: 12, SegmentVersion: 8, AppliedSeq: 1337},
 		},
 	}
 }
@@ -41,11 +41,56 @@ func assertManifestEqual(t *testing.T, got, want *Manifest) {
 	}
 	for i := range want.Leaves {
 		g, w := got.Leaves[i], want.Leaves[i]
-		if g.LeafID != w.LeafID || g.SegmentID != w.SegmentID || g.SegmentVersion != w.SegmentVersion {
+		if g.LeafID != w.LeafID || g.SegmentID != w.SegmentID || g.SegmentVersion != w.SegmentVersion ||
+			g.DictionaryGroupID != w.DictionaryGroupID ||
+			g.AppliedSeq != w.AppliedSeq {
 			t.Errorf("leaf %d = %+v, want %+v", i, g, w)
 		}
 		if !bytes.Equal(g.LowKey, w.LowKey) {
 			t.Errorf("leaf %d low key = %x, want %x", i, g.LowKey, w.LowKey)
+		}
+	}
+}
+
+func TestDecodeVersion3DefaultsDictionaryGroup(t *testing.T) {
+	key := []byte("m")
+	bodySize := manifestBodyHeadSize + 2*leafRecordV3Size + len(key)
+	data := make([]byte, manifestHeaderSize+bodySize+manifestChecksumSize)
+	copy(data[:4], manifestMagic)
+	binary.LittleEndian.PutUint32(data[4:8], manifestVersionV3)
+	pos := manifestHeaderSize
+	binary.LittleEndian.PutUint64(data[pos:pos+8], 3)
+	binary.LittleEndian.PutUint64(data[pos+8:pos+16], 55)
+	binary.LittleEndian.PutUint32(data[pos+16:pos+20], 2)
+	pos += manifestBodyHeadSize
+	for _, leaf := range []LeafRecord{
+		{LeafID: 1, SegmentID: 1, SegmentVersion: 2, Keys: 10, AppliedSeq: 55},
+		{LeafID: 2, SegmentID: 2, SegmentVersion: 1, Keys: 4, AppliedSeq: 55, LowKey: key},
+	} {
+		binary.LittleEndian.PutUint64(data[pos:pos+8], leaf.LeafID)
+		binary.LittleEndian.PutUint64(data[pos+8:pos+16], leaf.SegmentID)
+		binary.LittleEndian.PutUint64(data[pos+16:pos+24], leaf.SegmentVersion)
+		binary.LittleEndian.PutUint64(data[pos+24:pos+32], leaf.Keys)
+		binary.LittleEndian.PutUint64(data[pos+32:pos+40], leaf.AppliedSeq)
+		binary.LittleEndian.PutUint32(data[pos+40:pos+44], uint32(len(leaf.LowKey)))
+		pos += leafRecordV3Size
+		pos += copy(data[pos:], leaf.LowKey)
+	}
+	rechecksum(data)
+
+	decoded, err := DecodeManifest(data)
+	if err != nil {
+		t.Fatalf("decode v3: %v", err)
+	}
+	if got := decoded.SourceVersion(); got != manifestVersionV3 {
+		t.Fatalf("source version = %d, want %d", got, manifestVersionV3)
+	}
+	if !decoded.NeedsFormatUpgrade() {
+		t.Fatal("v3 manifest did not request upgrade")
+	}
+	for _, leaf := range decoded.Leaves {
+		if leaf.DictionaryGroup() != 1 {
+			t.Fatalf("leaf %d effective dictionary group = %d, want 1", leaf.LeafID, leaf.DictionaryGroup())
 		}
 	}
 }
@@ -69,6 +114,66 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDecodeVersion2InitializesPerLeafWatermarks(t *testing.T) {
+	const applied = uint64(77)
+	key := []byte("m")
+	bodySize := manifestBodyHeadSize + 2*leafRecordV2Size + len(key)
+	data := make([]byte, manifestHeaderSize+bodySize+manifestChecksumSize)
+	copy(data[:4], manifestMagic)
+	binary.LittleEndian.PutUint32(data[4:8], manifestVersionV2)
+	pos := manifestHeaderSize
+	binary.LittleEndian.PutUint64(data[pos:pos+8], 3)
+	binary.LittleEndian.PutUint64(data[pos+8:pos+16], applied)
+	binary.LittleEndian.PutUint32(data[pos+16:pos+20], 2)
+	pos += manifestBodyHeadSize
+	for i, leaf := range []LeafRecord{
+		{LeafID: 1, SegmentID: 1, SegmentVersion: 2, Keys: 10},
+		{LeafID: 2, SegmentID: 2, SegmentVersion: 1, Keys: 4, LowKey: key},
+	} {
+		binary.LittleEndian.PutUint64(data[pos:pos+8], leaf.LeafID)
+		binary.LittleEndian.PutUint64(data[pos+8:pos+16], leaf.SegmentID)
+		binary.LittleEndian.PutUint64(data[pos+16:pos+24], leaf.SegmentVersion)
+		binary.LittleEndian.PutUint64(data[pos+24:pos+32], leaf.Keys)
+		binary.LittleEndian.PutUint32(data[pos+32:pos+36], uint32(len(leaf.LowKey)))
+		pos += leafRecordV2Size
+		pos += copy(data[pos:], leaf.LowKey)
+		_ = i
+	}
+	rechecksum(data)
+
+	decoded, err := DecodeManifest(data)
+	if err != nil {
+		t.Fatalf("decode v2: %v", err)
+	}
+	if got := decoded.SourceVersion(); got != manifestVersionV2 {
+		t.Fatalf("source version = %d, want %d", got, manifestVersionV2)
+	}
+	for _, leaf := range decoded.Leaves {
+		if leaf.AppliedSeq != applied {
+			t.Fatalf("leaf %d applied seq = %d, want %d", leaf.LeafID, leaf.AppliedSeq, applied)
+		}
+	}
+}
+
+func TestSaveUpgradesLegacySourceVersion(t *testing.T) {
+	fs := disk.NewMemFS()
+	m := sampleManifest()
+	m.sourceVersion = manifestVersionV3
+	if err := Save(fs, FileName("db"), m); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.SourceVersion(); got != CurrentFormatVersion {
+		t.Fatalf("in-memory source version = %d, want %d", got, CurrentFormatVersion)
+	}
+	loaded, err := Load(fs, FileName("db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.SourceVersion(); got != CurrentFormatVersion {
+		t.Fatalf("persisted source version = %d, want %d", got, CurrentFormatVersion)
+	}
+}
+
 func TestSaveLoadEmptyManifest(t *testing.T) {
 	fs := disk.NewMemFS()
 	path := FileName("db")
@@ -82,6 +187,20 @@ func TestSaveLoadEmptyManifest(t *testing.T) {
 	}
 	if got.NextSegmentID != 1 || got.AppliedSeq != 0 || len(got.Leaves) != 0 {
 		t.Fatalf("unexpected manifest: %+v", got)
+	}
+}
+
+func TestValidateRejectsNonContiguousDictionaryGroup(t *testing.T) {
+	m := &Manifest{
+		NextSegmentID: 1,
+		Leaves: []LeafRecord{
+			{LeafID: 1, DictionaryGroupID: 1},
+			{LeafID: 2, LowKey: []byte("m"), DictionaryGroupID: 2},
+			{LeafID: 3, LowKey: []byte("z"), DictionaryGroupID: 1},
+		},
+	}
+	if err := m.Validate(); !errors.Is(err, ErrDictionaryGroupNotContiguous) {
+		t.Fatalf("Validate error = %v, want ErrDictionaryGroupNotContiguous", err)
 	}
 }
 
@@ -267,6 +386,51 @@ func TestValidate(t *testing.T) {
 			// An invalid manifest must never reach disk.
 			if err := Save(disk.NewMemFS(), FileName("db"), m); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Save = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidatePersistentIdentityInvariants(t *testing.T) {
+	tests := []struct {
+		name     string
+		manifest *Manifest
+		wantErr  error
+	}{
+		{
+			name: "duplicate segment id",
+			manifest: &Manifest{NextSegmentID: 2, Leaves: []LeafRecord{
+				{LeafID: 1, SegmentID: 1, SegmentVersion: 1},
+				{LeafID: 2, LowKey: []byte("m"), SegmentID: 1, SegmentVersion: 2},
+			}},
+			wantErr: ErrDuplicateSegmentID,
+		},
+		{
+			name: "allocator behind reference",
+			manifest: &Manifest{NextSegmentID: 2, Leaves: []LeafRecord{
+				{LeafID: 1, SegmentID: 2, SegmentVersion: 1},
+			}},
+			wantErr: ErrNextSegmentIDNotAdvanced,
+		},
+		{
+			name: "metadata on empty segment",
+			manifest: &Manifest{NextSegmentID: 1, Leaves: []LeafRecord{
+				{LeafID: 1, SegmentVersion: 1},
+			}},
+			wantErr: ErrInvalidEmptySegment,
+		},
+		{
+			name: "global watermark is not leaf minimum",
+			manifest: &Manifest{NextSegmentID: 1, AppliedSeq: 4, Leaves: []LeafRecord{
+				{LeafID: 1, AppliedSeq: 3},
+			}},
+			wantErr: ErrAppliedSeqMismatch,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.manifest.Validate(); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Validate = %v, want %v", err, tc.wantErr)
 			}
 		})
 	}
@@ -561,7 +725,7 @@ func TestSaveOverwritesPreviousContents(t *testing.T) {
 	small := &Manifest{
 		NextSegmentID: 2,
 		AppliedSeq:    99,
-		Leaves:        []LeafRecord{{LeafID: 77, SegmentID: 1, SegmentVersion: 1}},
+		Leaves:        []LeafRecord{{LeafID: 77, SegmentID: 1, SegmentVersion: 1, AppliedSeq: 99}},
 	}
 	if err := Save(fs, path, small); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -609,6 +773,19 @@ func TestSaveLoadNilArguments(t *testing.T) {
 	if _, err := Load(nil, "x"); !errors.Is(err, ErrNilFilesystem) {
 		t.Errorf("Load with nil fs: err = %v, want ErrNilFilesystem", err)
 	}
+}
+
+func FuzzDecodeManifestNeverPanics(f *testing.F) {
+	valid, err := sampleManifest().MarshalBinary()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(valid)
+	f.Add([]byte(manifestMagic))
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = DecodeManifest(data)
+	})
 }
 
 func TestClone(t *testing.T) {
