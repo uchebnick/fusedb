@@ -78,34 +78,31 @@ func (s *SkipList) DataBytes() int64 {
 func (s *SkipList) Apply(key []byte, op ops.Op) {
 	var prevList, nextList [maxHeight]*node
 
-	for {
-		// The height must be sampled before findSplice, not after. findSplice
-		// fills levels below the height it observes; reading a larger height
-		// afterwards makes prepareNewLevels believe the levels in between are
-		// already filled, and publishUpperLevels then dereferences a nil
-		// predecessor. Sampling first guarantees oldHeight never exceeds the
-		// height findSplice worked with, because the height only grows.
-		oldHeight := s.height.Load()
-		s.findSplice(key, &prevList, &nextList)
+	// The height must be sampled before findSplice, not after. findSplice
+	// fills levels below the height it observes; reading a larger height
+	// afterwards makes prepareNewLevels believe the levels in between are
+	// already filled, and publishUpperLevels then dereferences a nil
+	// predecessor. Sampling first guarantees oldHeight never exceeds the
+	// height findSplice worked with, because the height only grows.
+	oldHeight := s.height.Load()
+	s.findSplice(key, &prevList, &nextList)
 
-		if next := nextList[0]; next != nil && bytes.Equal(next.key, key) {
-			s.updateNode(next, op)
-			return
-		}
-
-		nodeHeight := s.randomHeight(key)
-
-		s.prepareNewLevels(oldHeight, nodeHeight, &prevList, &nextList)
-
-		newNode := newNode(key, op, nodeHeight)
-		if !s.publishBaseLevel(newNode, &prevList, &nextList) {
-			continue
-		}
-
-		s.publishUpperLevels(key, newNode, nodeHeight, &prevList, &nextList)
-		s.growHeight(oldHeight, nodeHeight)
+	if next := nextList[0]; next != nil && bytes.Equal(next.key, key) {
+		s.updateNode(next, op)
 		return
 	}
+
+	nodeHeight := s.randomHeight(key)
+	s.prepareNewLevels(oldHeight, nodeHeight, &prevList, &nextList)
+
+	newNode := newNode(key, op, nodeHeight)
+	if existing := s.publishBaseLevel(key, newNode, &prevList, &nextList); existing != nil {
+		s.updateNode(existing, op)
+		return
+	}
+
+	s.publishUpperLevels(key, newNode, nodeHeight, &prevList, &nextList)
+	s.growHeight(oldHeight, nodeHeight)
 }
 
 // Read returns the current Op for key without copying Op.Data.
@@ -226,6 +223,48 @@ func (s *SkipList) findSpliceAtLevel(key []byte, targetLevel int32) (*node, *nod
 	return s.head, s.head.next[targetLevel].Load()
 }
 
+// resumeSplice refreshes a search path after a failed link CAS. Active nodes
+// are never removed, so every saved predecessor remains valid and before key.
+// At each level we resume from the farther of the node reached above and the
+// saved predecessor, retaining skiplist traversal instead of walking a long
+// level-0 chain or restarting at head.
+func (s *SkipList) resumeSplice(
+	key []byte,
+	targetLevel int32,
+	prevList,
+	nextList *[maxHeight]*node,
+) {
+	x := s.head
+	for level := s.height.Load() - 1; level >= targetLevel; level-- {
+		if saved := prevList[level]; saved != nil && s.nodeBefore(x, saved) {
+			x = saved
+		}
+
+		for {
+			next := x.next[level].Load()
+			if next == nil || bytes.Compare(next.key, key) >= 0 {
+				prevList[level] = x
+				nextList[level] = next
+				break
+			}
+			x = next
+		}
+	}
+}
+
+func (s *SkipList) nodeBefore(left, right *node) bool {
+	if left == right || right == nil {
+		return false
+	}
+	if left == s.head {
+		return true
+	}
+	if right == s.head {
+		return false
+	}
+	return bytes.Compare(left.key, right.key) < 0
+}
+
 func (s *SkipList) updateNode(n *node, op ops.Op) {
 	for i := 0; ; i++ {
 		oldPtr := n.op.Load()
@@ -259,19 +298,25 @@ func (s *SkipList) prepareNewLevels(
 }
 
 func (s *SkipList) publishBaseLevel(
+	key []byte,
 	node *node,
 	prevList,
 	nextList *[maxHeight]*node,
-) bool {
-	node.next[0].Store(nextList[0])
+) *node {
+	for {
+		if next := nextList[0]; next != nil && bytes.Equal(next.key, key) {
+			return next
+		}
 
-	if !prevList[0].next[0].CompareAndSwap(nextList[0], node) {
-		return false
+		node.next[0].Store(nextList[0])
+		if prevList[0].next[0].CompareAndSwap(nextList[0], node) {
+			s.nodeCount.Add(1)
+			s.dataBytes.Add(int64(len(node.op.Load().Data)))
+			return nil
+		}
+
+		s.resumeSplice(key, 0, prevList, nextList)
 	}
-
-	s.nodeCount.Add(1)
-	s.dataBytes.Add(int64(len(node.op.Load().Data)))
-	return true
 }
 
 func (s *SkipList) publishUpperLevels(
@@ -289,7 +334,7 @@ func (s *SkipList) publishUpperLevels(
 				break
 			}
 
-			prevList[level], nextList[level] = s.findSpliceAtLevel(key, level)
+			s.resumeSplice(key, level, prevList, nextList)
 		}
 	}
 }

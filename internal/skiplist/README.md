@@ -101,7 +101,9 @@ Insert flow:
 6. grow global height with CAS
 
 Because nodes are not removed, readers and iterators can safely follow published
-links without dealing with physical deletion.
+links without dealing with physical deletion. The same invariant lets a failed
+link CAS resume from the saved search spine: retries refresh only the portion
+that concurrent inserts changed instead of restarting from the head node.
 
 ## Height Selection
 

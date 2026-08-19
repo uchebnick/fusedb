@@ -2,6 +2,7 @@ package skiplist
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/uchebnick/fusedb/internal/ops"
@@ -24,6 +25,27 @@ func BenchmarkUpdateNodeContention(b *testing.B) {
 				op := ops.NewInc(1)
 				for pb.Next() {
 					sl.Apply(hotKey, op)
+				}
+			})
+		})
+	}
+}
+
+// BenchmarkInsertContention measures unique, monotonically increasing inserts.
+// Concurrent writers tend to race on the same tail splice, so a failed base
+// level CAS exercises the insertion retry path rather than updateNode.
+func BenchmarkInsertContention(b *testing.B) {
+	for _, parallelism := range []int{1, 2, 4, 8} {
+		b.Run(fmt.Sprintf("parallelism=%d", parallelism), func(b *testing.B) {
+			sl := NewSkipList(0)
+			var sequence atomic.Uint64
+
+			b.ReportAllocs()
+			b.SetParallelism(parallelism)
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					key := []byte(fmt.Sprintf("key:%020d", sequence.Add(1)))
+					sl.Apply(key, ops.NewPut(nil))
 				}
 			})
 		})

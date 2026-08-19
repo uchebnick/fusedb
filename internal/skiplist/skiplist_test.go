@@ -194,6 +194,61 @@ func TestConcurrentIncCoalesces(t *testing.T) {
 	}
 }
 
+func TestPublishBaseLevelResumesFromStalePredecessor(t *testing.T) {
+	list := NewSkipList(42)
+	list.Apply([]byte("a"), ops.NewPut([]byte("a")))
+	list.Apply([]byte("z"), ops.NewPut([]byte("z")))
+
+	var prevList, nextList [maxHeight]*node
+	list.findSplice([]byte("d"), &prevList, &nextList)
+	stalePredecessor := prevList[0]
+
+	// Invalidate the saved a -> z splice twice. Because nodes are never
+	// removed, the retry may resume at a and only walk across b and c.
+	list.Apply([]byte("b"), ops.NewPut([]byte("b")))
+	list.Apply([]byte("c"), ops.NewPut([]byte("c")))
+
+	candidate := newNode([]byte("d"), ops.NewPut([]byte("d")), 1)
+	if existing := list.publishBaseLevel([]byte("d"), candidate, &prevList, &nextList); existing != nil {
+		t.Fatalf("publish returned existing key %q", existing.key)
+	}
+	if prevList[0] == stalePredecessor || string(prevList[0].key) != "c" {
+		t.Fatalf("retry predecessor = %q, want c", prevList[0].key)
+	}
+
+	got, ok := list.Read([]byte("d"))
+	if !ok || got.Kind != ops.OpPut || string(got.Data) != "d" {
+		t.Fatalf("read d = %#v, %v; want put(d), true", got, ok)
+	}
+	if got, want := list.Len(), int64(5); got != want {
+		t.Fatalf("len = %d, want %d", got, want)
+	}
+}
+
+func TestPublishBaseLevelRetryFindsConcurrentSameKey(t *testing.T) {
+	list := NewSkipList(42)
+	list.Apply([]byte("a"), ops.NewPut([]byte("a")))
+	list.Apply([]byte("z"), ops.NewPut([]byte("z")))
+
+	var prevList, nextList [maxHeight]*node
+	list.findSplice([]byte("m"), &prevList, &nextList)
+
+	list.Apply([]byte("m"), ops.NewPut([]byte("winner")))
+	candidate := newNode([]byte("m"), ops.NewPut([]byte("loser")), 1)
+	existing := list.publishBaseLevel([]byte("m"), candidate, &prevList, &nextList)
+	if existing == nil || string(existing.key) != "m" {
+		t.Fatalf("publish existing = %v, want m", existing)
+	}
+	if got, want := list.Len(), int64(3); got != want {
+		t.Fatalf("len = %d, want %d", got, want)
+	}
+
+	got, ok := list.Read([]byte("m"))
+	if !ok || string(got.Data) != "winner" {
+		t.Fatalf("read m = %#v, %v; want winner, true", got, ok)
+	}
+}
+
 func makeBenchmarkSkipList(b *testing.B, n int) *SkipList {
 	b.Helper()
 
