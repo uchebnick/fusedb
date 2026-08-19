@@ -182,6 +182,22 @@ make benchmark-quick
 make benchmark-rocksdb
 ```
 
+Apple M4 snapshot, 20,000 × 256-byte keys/values, eight workers, median of
+three runs:
+
+| Profile / workload | FuseDB | Pebble | Badger | RocksDB |
+|---|---:|---:|---:|---:|
+| async / random read | 4.79M ops/s | 1.52M | 0.52M | 2.16M |
+| async / 50:50 | 0.67M ops/s | 0.89M | 0.19M | 0.24M |
+| async / overwrite | 1.08M ops/s | 0.58M | 0.17M | 0.13M |
+| sync / overwrite | 2,033 ops/s | 1,056 | 20,683 | 1,137 |
+
+This is not a universal ranking. FuseDB leads this small hot-set read and async
+overwrite run; Pebble leads the concurrent async balanced/read-heavy mixes;
+Badger's mmap/msync design is much faster in this machine's sync profile.
+FuseDB's async read-heavy p99 under eight workers is `179 µs` versus `17 µs`
+for Pebble, so throughput is not the whole result.
+
 The [methodology](./benchmarks/README.md) explains cache targets, warmup,
 workloads, native-library setup, limitations, and how not to over-interpret the
 [latest recorded results](./benchmarks/RESULTS.md).

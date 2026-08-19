@@ -169,6 +169,22 @@ make benchmark-quick
 make benchmark-rocksdb
 ```
 
+Срез на Apple M4: 20 000 ключей × 256 B, восемь workers, медиана трёх
+повторений:
+
+| Профиль / workload | FuseDB | Pebble | Badger | RocksDB |
+|---|---:|---:|---:|---:|
+| async / random read | 4,79M ops/s | 1,52M | 0,52M | 2,16M |
+| async / 50:50 | 0,67M ops/s | 0,89M | 0,19M | 0,24M |
+| async / overwrite | 1,08M ops/s | 0,58M | 0,17M | 0,13M |
+| sync / overwrite | 2 033 ops/s | 1 056 | 20 683 | 1 137 |
+
+Это не общий рейтинг. FuseDB лидирует в этом небольшом hot-set read и async
+overwrite; Pebble — в конкурентном async balanced/read-heavy; mmap/msync-модель
+Badger заметно быстрее в sync-профиле этой машины. У FuseDB p99 на async
+read-heavy с восемью workers — `179 мкс` против `17 мкс` у Pebble, поэтому
+одного throughput для вывода недостаточно.
+
 Читайте [методологию](./benchmarks/README.md) перед
 [результатами](./benchmarks/RESULTS.md): короткий hot-key benchmark не
 проверяет recovery, backups, долгие compaction stalls или зрелость продукта.
