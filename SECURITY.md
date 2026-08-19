@@ -17,7 +17,12 @@ has a regression test and the durability/security gates pass.
 
 ## Supported versions
 
-Until the first stable release, only the current `main` revision is eligible
-for fixes. Historical commits, benchmark containers, and experimental internal
+| Version | Supported |
+|---|---|
+| `0.1.x` | Yes |
+| `< 0.1.0` | No |
+
+Only the latest patch of the current pre-1.0 minor line and the current `main`
+revision are eligible for fixes. Benchmark containers and experimental internal
 packages are unsupported. Security-relevant release artifacts and dependency
 policy are documented in [`docs/release.md`](./docs/release.md).

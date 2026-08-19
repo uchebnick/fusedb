@@ -13,7 +13,7 @@ and uncompressed configurations, but creating or loading a dictionary returns
 CGO.
 
 ```bash
-go get github.com/uchebnick/fusedb/pkg/fusedb@latest
+go get github.com/uchebnick/fusedb/pkg/fusedb@v0.1.0
 ```
 
 ## Opening and closing
@@ -402,7 +402,7 @@ The ownership contract is part of the tested public behavior:
 - Point operations only; no range scan API
 - No general read/write transactions, transactional read snapshots, TTLs, or
   arbitrary value compare-and-swap; atomic conditional write batches are supported
-- No compatibility promise between unreleased storage-format versions
+- No compatibility promise between pre-1.0 storage-format versions
 
 Runnable examples are in [`pkg/fusedb/example_test.go`](./pkg/fusedb/example_test.go).
 The likes/tickets pilot adapter is in

@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/uchebnick/fusedb/actions/workflows/ci.yml"><img src="https://github.com/uchebnick/fusedb/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/uchebnick/fusedb/releases/latest"><img src="https://img.shields.io/github/v/release/uchebnick/fusedb?display_name=tag&sort=semver" alt="Release"></a>
   <a href="https://pkg.go.dev/github.com/uchebnick/fusedb/pkg/fusedb"><img src="https://pkg.go.dev/badge/github.com/uchebnick/fusedb/pkg/fusedb.svg" alt="Go Reference"></a>
   <img src="https://img.shields.io/badge/Go-1.25.13-00ADD8?logo=go&logoColor=white" alt="Go 1.25.13">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e.svg" alt="MIT license"></a>
@@ -40,7 +41,7 @@ FuseDB — конкурентная встраиваемая key-value база 
 `brew install lz4` в macOS).
 
 ```bash
-go get github.com/uchebnick/fusedb/pkg/fusedb@latest
+go get github.com/uchebnick/fusedb/pkg/fusedb@v0.1.0
 ```
 
 ```go

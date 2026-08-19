@@ -1,8 +1,7 @@
 # Release engineering
 
-FuseDB is a Go library in research stage. This document defines the release
-mechanics; it does not turn the current revision into a production-supported
-database.
+FuseDB is a pre-1.0 Go library. This document defines the release mechanics;
+a versioned release does not by itself make the database production-supported.
 
 ## Supported build surface
 
