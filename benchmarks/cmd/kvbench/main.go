@@ -110,7 +110,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if len(report.Results) == 0 {
 		return runErr
 	}
-	report.Command = append([]string{"go", "run", "./cmd/kvbench"}, args...)
+	report.Command = benchmarkCommand(args)
 	jsonData, err := report.JSON()
 	if err != nil {
 		return errors.Join(runErr, fmt.Errorf("encode JSON report: %w", err))
@@ -130,6 +130,18 @@ func run(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprint(stdout, markdown)
 	}
 	return runErr
+}
+
+func benchmarkCommand(args []string) []string {
+	command := []string{"go", "run"}
+	for _, engine := range kvbench.Engines() {
+		if engine.Name == "rocksdb" && engine.Available {
+			command = append(command, "-tags", "rocksdb")
+			break
+		}
+	}
+	command = append(command, "./cmd/kvbench")
+	return append(command, args...)
 }
 
 func requestedProfile(args []string) (string, error) {
