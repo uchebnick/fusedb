@@ -191,15 +191,15 @@ func (c *Cursor) readRecord() (Record, int64, error) {
 
 	seq, err := binary.ReadUvarint(c)
 	if err != nil {
-		return Record{}, 0, errTornTail
+		return Record{}, 0, c.classifyVarintError("sequence", err)
 	}
 	keyLen, err := binary.ReadUvarint(c)
 	if err != nil {
-		return Record{}, 0, errTornTail
+		return Record{}, 0, c.classifyVarintError("key length", err)
 	}
 	payloadLen, err := binary.ReadUvarint(c)
 	if err != nil {
-		return Record{}, 0, errTornTail
+		return Record{}, 0, c.classifyVarintError("payload length", err)
 	}
 
 	headerLen := int64(len(c.scratch))
@@ -213,8 +213,6 @@ func (c *Cursor) readRecord() (Record, int64, error) {
 	if total > remaining {
 		return Record{}, 0, errTornTail
 	}
-	atFileEnd := total == remaining
-
 	body := make([]byte, int(keyLen)+int(payloadLen)+recordChecksumSize)
 	if _, err := io.ReadFull(c.br, body); err != nil {
 		return Record{}, 0, errTornTail
@@ -224,15 +222,9 @@ func (c *Cursor) readRecord() (Record, int64, error) {
 	want := binary.LittleEndian.Uint32(body[dataEnd:])
 	got := crc32.Update(crc32.Update(0, crcTable, c.scratch), crcTable, body[:dataEnd])
 	if got != want {
-		if atFileEnd {
-			return Record{}, 0, errTornTail
-		}
 		return Record{}, 0, fmt.Errorf("%w: checksum mismatch at offset %d", ErrCorruptRecord, c.offset)
 	}
 	if seq != c.nextSeq {
-		if atFileEnd {
-			return Record{}, 0, errTornTail
-		}
 		return Record{}, 0, fmt.Errorf("%w: want seq %d, got %d at offset %d", ErrSequenceGap, c.nextSeq, seq, c.offset)
 	}
 
@@ -243,6 +235,13 @@ func (c *Cursor) readRecord() (Record, int64, error) {
 		Payload: body[keyLen:dataEnd:dataEnd],
 	}
 	return record, total, nil
+}
+
+func (c *Cursor) classifyVarintError(field string, err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return errTornTail
+	}
+	return fmt.Errorf("%w: invalid %s at offset %d: %v", ErrCorruptRecord, field, c.offset, err)
 }
 
 // ReadByte implements io.ByteReader so uvarint fields feed the running record

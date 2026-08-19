@@ -9,7 +9,6 @@ import (
 	"github.com/uchebnick/fusedb/internal/compression"
 	enginemetrics "github.com/uchebnick/fusedb/internal/metrics"
 	"github.com/uchebnick/fusedb/internal/scheduler"
-	"github.com/uchebnick/fusedb/internal/segment"
 )
 
 const defaultDictionaryGCMaxFilesPerRun = 64
@@ -45,6 +44,10 @@ type DictionaryGCReport struct {
 // adaptive scheduler. It may return context.Canceled when foreground pressure
 // appears; every deletion completed before cancellation remains safe.
 func (db *DB) CollectDictionaryGarbage(ctx context.Context) (DictionaryGCReport, error) {
+	if err := db.beginForeground(); err != nil {
+		return DictionaryGCReport{}, err
+	}
+	defer db.endForeground()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -178,20 +181,19 @@ func (db *DB) liveDictionaryIDs(ctx context.Context) (map[uint32]struct{}, error
 		live[group.ActiveDictionaryID] = struct{}{}
 	}
 
-	current := db.tree.Manifest()
-	for _, leaf := range current.Leaves {
+	// Current readers already carry validated immutable segment headers. Using
+	// them avoids reopening every segment file after each local merge merely to
+	// rediscover its dictionary ID.
+	for _, leaf := range db.tree.Leaves() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if leaf.SegmentID == 0 {
+		reader := leaf.Reader()
+		if reader == nil || reader.Segment() == nil {
 			continue
 		}
-		opened, err := segment.OpenSegment(db.fs, segment.SegmentFileName(db.dir, leaf.SegmentID, leaf.SegmentVersion))
-		if err != nil {
-			return nil, fmt.Errorf("%w: inspect leaf %d dictionary reference: %v", ErrCorruption, leaf.LeafID, err)
-		}
-		if opened.Header.DictionaryID != 0 {
-			live[opened.Header.DictionaryID] = struct{}{}
+		if id := reader.Segment().Header.DictionaryID; id != 0 {
+			live[id] = struct{}{}
 		}
 	}
 	return live, nil

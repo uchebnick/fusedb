@@ -494,19 +494,23 @@ func (w *WAL) failPersistence(cause error, uncertain bool) error {
 // rotate runs on the writer goroutine and replaces the log file with one that
 // only holds records above upToSeq.
 func (w *WAL) rotate(upToSeq uint64) error {
+	// Capture the highest sequence that is already staged before the flush.
+	// Appends may continue while the writer is syncing; clamping against a later
+	// LastSeq could advance BaseSeq past a record still sitting in active.
+	flushThrough := w.lastSeq.Load()
 	// Persist everything staged so far; the rewrite reads from the file.
 	if err := w.flushActive(); err != nil {
 		return err
 	}
-	if last := w.lastSeq.Load(); upToSeq > last {
-		upToSeq = last
+	if upToSeq > flushThrough {
+		upToSeq = flushThrough
 	}
 
 	// The handle must be released before the rename so the platform can swap
 	// the file underneath it.
 	oldOffset := w.offset
 	if err := w.file.Close(); err != nil {
-		return err
+		return w.failPersistence(err, false)
 	}
 	w.file = nil
 
@@ -537,22 +541,26 @@ func (w *WAL) rotate(upToSeq uint64) error {
 		if errors.Is(err, disk.ErrCommitUncertain) {
 			file, reopenErr := w.fs.OpenReadWrite(w.path)
 			if reopenErr != nil {
-				return errors.Join(err, reopenErr)
+				return w.failPersistence(errors.Join(err, reopenErr), true)
 			}
 			w.file = file
 			w.offset = newOffset
 			w.baseSeq.Store(newBase)
-			return err
+			// The rename may or may not survive a crash. No later write can be
+			// acknowledged safely against either possible directory entry.
+			return w.failPersistence(err, true)
 		}
 		// The original file survived the failed rotation; reattach to it so the
 		// log stays usable.
-		w.reopen(oldOffset)
+		if reopenErr := w.reopen(oldOffset); reopenErr != nil {
+			return w.failPersistence(errors.Join(err, reopenErr), false)
+		}
 		return err
 	}
 
 	file, err := w.fs.OpenReadWrite(w.path)
 	if err != nil {
-		return err
+		return w.failPersistence(err, false)
 	}
 	w.file = file
 	w.offset = newOffset
@@ -560,13 +568,14 @@ func (w *WAL) rotate(upToSeq uint64) error {
 	return nil
 }
 
-func (w *WAL) reopen(offset int64) {
+func (w *WAL) reopen(offset int64) error {
 	file, err := w.fs.OpenReadWrite(w.path)
 	if err != nil {
-		return
+		return err
 	}
 	w.file = file
 	w.offset = offset
+	return nil
 }
 
 // installFile writes data through a temporary file and renames it into place

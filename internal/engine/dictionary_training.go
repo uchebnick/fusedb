@@ -208,22 +208,29 @@ func (t *dictionaryTrainer) scheduleTrain(groupID uint64) {
 		},
 		Preemptible: true,
 		Run:         func(ctx context.Context) error { return t.train(ctx, groupID) },
-		OnDone: func(err error) {
-			t.mu.Lock()
-			if group := t.groups[groupID]; group != nil {
-				group.trainRun = false
-			}
-			closed := t.closed
-			t.mu.Unlock()
-			if !closed && errors.Is(err, context.Canceled) {
-				t.scheduleTrain(groupID)
-			}
-		},
+		OnDone:      func(err error) { t.trainDone(groupID, err) },
 	}
 	if !background.Submit(job) {
 		t.mu.Lock()
 		group.trainRun = false
 		t.mu.Unlock()
+	}
+}
+
+func (t *dictionaryTrainer) trainDone(groupID uint64, err error) {
+	t.mu.Lock()
+	if group := t.groups[groupID]; group != nil {
+		group.trainRun = false
+	}
+	closed := t.closed
+	t.mu.Unlock()
+	if !closed && errors.Is(err, context.Canceled) {
+		t.scheduleTrain(groupID)
+	} else if !closed && err != nil {
+		// A full group cannot accept another observation to trigger a retry.
+		// Release the failed sample generation so fresh real data can build the
+		// next candidate instead of wedging the group.
+		t.finishCandidate(groupID, false)
 	}
 }
 
@@ -236,18 +243,30 @@ func (t *dictionaryTrainer) train(ctx context.Context, groupID uint64) error {
 	}
 	samples := append([][]byte(nil), group.training...)
 	t.mu.Unlock()
-	id, err := t.catalog.ReserveDictionaryID()
-	if err != nil {
-		t.handleFatal(err)
-		return err
-	}
-	candidate, err := compression.TrainDictionaryCooperative(ctx, compression.AdaptiveTrainOptions{
-		ID:         id,
+	trained, err := compression.TrainDictionaryCooperative(ctx, compression.AdaptiveTrainOptions{
+		// The durable ID is reserved only after cancellable CPU work succeeds.
+		// A temporary non-zero ID has no effect on the trained bytes.
+		ID:         1,
 		Size:       t.cfg.DictionarySize,
 		ChunkBytes: t.cfg.ChunkBytes,
 		MaxChunks:  t.cfg.MaxChunks,
 		Samples:    samples,
 	})
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = trained.Close()
+		return err
+	}
+	id, err := t.catalog.ReserveDictionaryID()
+	if err != nil {
+		_ = trained.Close()
+		t.handleFatal(err)
+		return err
+	}
+	candidate, err := compression.NewDictionaryLevel(id, trained.Raw(), trained.Level())
+	_ = trained.Close()
 	if err != nil {
 		return err
 	}
@@ -341,7 +360,11 @@ func (t *dictionaryTrainer) evaluate(ctx context.Context, groupID uint64) error 
 		}
 		if _, err := t.catalog.Publish(groupID, candidate.ID()); err != nil {
 			t.handleFatal(err)
-			t.finishCandidate(groupID, true)
+			t.registry.Remove(candidate.ID())
+			t.finishCandidate(groupID, false)
+			if t.lifecycleChanged != nil {
+				t.lifecycleChanged()
+			}
 			return err
 		}
 		if t.lifecycleChanged != nil {

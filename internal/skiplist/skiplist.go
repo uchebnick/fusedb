@@ -13,6 +13,8 @@ import (
 
 const maxHeight = 20
 
+const skiplistNodeOverhead int64 = 96
+
 // SkipList is an ordered in-memory mutation index for byte keys.
 //
 // It stores Op values, keeps deletes as tombstones, and never physically
@@ -23,7 +25,10 @@ type SkipList struct {
 	height    atomic.Int32
 	nodeCount atomic.Int64
 	dataBytes atomic.Int64
-	seed      uint64
+	// retainedBytes is a conservative scheduler-facing heap estimate including
+	// keys, payloads, nodes, operation metadata, and tower pointers.
+	retainedBytes atomic.Int64
+	seed          uint64
 }
 
 // node is one published skiplist node.
@@ -66,6 +71,12 @@ func (s *SkipList) Len() int64 {
 // operation is successfully published.
 func (s *SkipList) DataBytes() int64 {
 	return s.dataBytes.Load()
+}
+
+// EstimatedBytes returns a conservative estimate of heap retained by live
+// nodes. Unlike DataBytes it charges tombstones and small-key metadata.
+func (s *SkipList) EstimatedBytes() int64 {
+	return s.retainedBytes.Load()
 }
 
 // Apply publishes op for key.
@@ -168,7 +179,7 @@ func (s *SkipList) SafeIter() iter.Seq2[[]byte, ops.Op] {
 
 func newNode(key []byte, op ops.Op, height int32) *node {
 	n := &node{
-		key:  key,
+		key:  bytes.Clone(key),
 		next: make([]atomic.Pointer[node], height),
 	}
 	n.op.Store(&op)
@@ -271,7 +282,9 @@ func (s *SkipList) updateNode(n *node, op ops.Op) {
 
 		merged := coalesceToNew(*oldPtr, op)
 		if n.op.CompareAndSwap(oldPtr, &merged) {
-			s.dataBytes.Add(int64(len(merged.Data) - len(oldPtr.Data)))
+			delta := int64(len(merged.Data) - len(oldPtr.Data))
+			s.dataBytes.Add(delta)
+			s.retainedBytes.Add(delta)
 			return
 		}
 
@@ -312,6 +325,7 @@ func (s *SkipList) publishBaseLevel(
 		if prevList[0].next[0].CompareAndSwap(nextList[0], node) {
 			s.nodeCount.Add(1)
 			s.dataBytes.Add(int64(len(node.op.Load().Data)))
+			s.retainedBytes.Add(skiplistNodeOverhead + int64(len(node.key)+len(node.op.Load().Data)+8*len(node.next)))
 			return nil
 		}
 

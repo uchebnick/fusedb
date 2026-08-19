@@ -66,18 +66,18 @@ func (l *Leaf) Detached() bool {
 //
 // handover receives the operations that arrived after the merge froze the
 // buffer, and must both route them into the new leaves and publish those leaves
-// so that writers see them the moment this returns. Doing both under the write
-// lock is what preserves write ordering: if the new leaves became visible
-// first, a fresh write could land under an older operation replayed here.
+// so that writers see them the moment this returns. The active layer remains
+// attached to the old leaf, keeping lock-free reads complete until publication.
+// Doing both under the write lock preserves write ordering: if the new leaves
+// became visible first, a fresh write could land under an older operation
+// replayed here.
 func (l *Leaf) DetachUnder(handover func(pending iter.Seq2[[]byte, ops.Op])) {
 	l.writeMu.Lock()
 	defer l.writeMu.Unlock()
 
 	l.detached = true
-
-	pending := l.buffer.TakeActive()
 	if handover != nil {
-		handover(pending.Iter())
+		handover(l.buffer.IterOps())
 	}
 }
 
@@ -85,8 +85,9 @@ func (l *Leaf) DetachUnder(handover func(pending iter.Seq2[[]byte, ops.Op])) {
 //
 // A checkpoint calls this on every leaf while writers are held off, so the set
 // of frozen operations corresponds exactly to a known log position. A false
-// result means a frozen layer was already present from an earlier merge, which
-// is harmless: those operations are merged too.
+// result means the exact generation was already frozen by the caller. Ordinary
+// merge failures roll it back before a retry; commit-uncertain failures require
+// reopening the database instead of retrying this handle.
 func (l *Leaf) FreezeBuffer() bool {
 	if l == nil {
 		return false
@@ -99,6 +100,18 @@ func (l *Leaf) FreezeBuffer() bool {
 	defer l.writeMu.Unlock()
 
 	return l.buffer.Freeze()
+}
+
+// RollbackFrozen returns a failed merge generation to the active buffer.
+// Writers are excluded while both layers are rebuilt into one ordered layer.
+func (l *Leaf) RollbackFrozen() bool {
+	if l == nil {
+		return false
+	}
+
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
+	return l.buffer.RollbackFrozen()
 }
 
 // ApplyOp publishes op for key directly into the active buffer.

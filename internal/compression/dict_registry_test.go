@@ -2,12 +2,80 @@ package compression
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/uchebnick/fusedb/internal/disk"
 )
+
+func TestPersistentRegistryNeverOverwritesDictionaryID(t *testing.T) {
+	fs := disk.NewMemFS()
+	first, err := NewDictionaryLevel(41, []byte("first immutable dictionary"), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+
+	registry, err := NewPersistentRegistry(fs, "dicts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Save(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewPersistentRegistry(fs, "dicts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	collision, err := NewDictionaryLevel(41, []byte("different dictionary bytes"), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = collision.Close() })
+	if err := reopened.Save(collision); !errors.Is(err, ErrDuplicateDictionary) {
+		t.Fatalf("collision save error = %v, want ErrDuplicateDictionary", err)
+	}
+
+	persisted, err := LoadDictionary(fs, DictionaryFileName("dicts", 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer persisted.Close()
+	if got, want := persisted.Raw(), []byte("first immutable dictionary"); !bytes.Equal(got, want) {
+		t.Fatalf("persisted dictionary was overwritten: got %q, want %q", got, want)
+	}
+}
+
+func TestPersistentRegistrySaveIsIdempotentForSameDictionary(t *testing.T) {
+	fs := disk.NewMemFS()
+	registry, err := NewPersistentRegistry(fs, "dicts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+
+	first, err := NewDictionaryLevel(42, []byte("same immutable dictionary"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Save(first); err != nil {
+		t.Fatal(err)
+	}
+	equivalent, err := NewDictionaryLevel(42, []byte("same immutable dictionary"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Save(equivalent); err != nil {
+		t.Fatalf("idempotent save: %v", err)
+	}
+}
 
 func TestPersistentRegistrySaveAndLazyLoad(t *testing.T) {
 	fs := disk.NewMemFS()

@@ -68,6 +68,10 @@ func IncMutation(key []byte, delta int64) Mutation {
 // in one WAL record and one foreground visibility window. A false result with
 // a nil error means at least one condition did not match and nothing changed.
 func (db *DB) Apply(conditions []Condition, mutations []Mutation) (bool, error) {
+	if err := db.beginForeground(); err != nil {
+		return false, err
+	}
+	defer db.endForeground()
 	started := db.telemetry.BeginWrite()
 	defer db.telemetry.EndWrite(started)
 
@@ -95,6 +99,10 @@ func (db *DB) ApplyOnce(idempotencyKey []byte, mutations []Mutation) (bool, erro
 // The decision is persisted even when a condition does not match, preventing
 // a delayed retry from applying later against different business state.
 func (db *DB) ApplyOnceIf(idempotencyKey []byte, conditions []Condition, mutations []Mutation) (bool, error) {
+	if err := db.beginForeground(); err != nil {
+		return false, err
+	}
+	defer db.endForeground()
 	started := db.telemetry.BeginWrite()
 	defer db.telemetry.EndWrite(started)
 

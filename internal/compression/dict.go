@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -418,23 +419,44 @@ func (r *Registry) Save(dict *Dictionary) error {
 	r.mu.RLock()
 	existing, exists := r.dicts[dict.id]
 	r.mu.RUnlock()
-	if exists && existing.dict != dict {
+	if exists && !sameDictionary(existing.dict, dict) {
 		return fmt.Errorf("%w: %d", ErrDuplicateDictionary, dict.id)
 	}
 
 	name := DictionaryFileName(r.dir, dict.ID())
-	if err := SaveDictionary(r.fs, name, dict); err != nil {
-		return err
+	persisted, err := LoadDictionary(r.fs, name)
+	switch {
+	case err == nil:
+		same := sameDictionary(persisted, dict)
+		_ = persisted.Close()
+		if !same {
+			return fmt.Errorf("%w: persisted id %d has different contents", ErrDuplicateDictionary, dict.id)
+		}
+	case errors.Is(err, os.ErrNotExist):
+		if err := SaveDictionary(r.fs, name, dict); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("compression: inspect persisted dictionary %d: %w", dict.id, err)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if existing, exists := r.dicts[dict.id]; exists && existing.dict != dict {
+	if existing, exists := r.dicts[dict.id]; exists && !sameDictionary(existing.dict, dict) {
 		return fmt.Errorf("%w: %d", ErrDuplicateDictionary, dict.id)
 	}
 	r.storeLocked(dict)
 	return nil
+}
+
+func sameDictionary(left, right *Dictionary) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.ID() == right.ID() &&
+		left.Level() == right.Level() &&
+		bytes.Equal(left.raw, right.raw)
 }
 
 // Load reads dictionary from registry storage and caches it in memory.

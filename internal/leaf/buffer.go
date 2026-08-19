@@ -63,6 +63,13 @@ func (b *Buffer) EstimatedBytes() int64 {
 	return b.DataBytes()
 }
 
+// RetainedBytes estimates active-buffer heap for maintenance admission. It
+// includes key and node overhead so workloads made of tombstones, counters, or
+// tiny values still create merge debt.
+func (b *Buffer) RetainedBytes() int64 {
+	return b.activeList().EstimatedBytes()
+}
+
 // Apply publishes op for key.
 //
 // Callers must not mutate key while Apply is running and must treat op.Data as
@@ -200,6 +207,33 @@ func (b *Buffer) ClearFrozen() {
 		return
 	}
 	b.state.Store(&layers{active: current.active})
+}
+
+// RollbackFrozen folds a failed merge's frozen layer back under the active
+// layer. The frozen operations are applied first and the newer active
+// operations second, preserving the same ordering as ReadOp.
+//
+// Callers must exclude writers around this call. It is intentionally used only
+// on a failed merge path so the next freeze can capture one exact generation
+// and its corresponding WAL watermark.
+func (b *Buffer) RollbackFrozen() bool {
+	b.freezeMu.Lock()
+	defer b.freezeMu.Unlock()
+
+	current := b.load()
+	if current.frozen == nil {
+		return false
+	}
+
+	merged := skiplist.NewSkipList(b.seed)
+	for key, op := range current.frozen.Iter() {
+		merged.Apply(key, op)
+	}
+	for key, op := range current.active.Iter() {
+		merged.Apply(key, op)
+	}
+	b.state.Store(&layers{active: merged})
+	return true
 }
 
 // TakeActive swaps in a fresh active list and returns the previous one.

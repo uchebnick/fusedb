@@ -1,6 +1,8 @@
 package wal
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
@@ -292,25 +294,36 @@ func TestTruncatedTailIsDroppedOnReopen(t *testing.T) {
 	}
 }
 
-func TestCorruptedTrailingRecordIsTreatedAsTail(t *testing.T) {
+func TestCompleteCorruptedTrailingRecordIsRejected(t *testing.T) {
 	fs := disk.NewMemFS()
 	writeSampleLog(t, fs, 5)
 
 	data := readBytes(t, fs, testPath)
-	// Flip a key byte of the last record; the record still ends at EOF, so this
-	// is indistinguishable from an interrupted write and must not be an error.
+	// Flip a key byte of the last length-complete record. Silently treating a
+	// checksum mismatch as a torn write would delete a potentially acknowledged
+	// record during Open.
 	data[len(data)-10] ^= 0xff
 	rewriteBytes(t, fs, testPath, data)
 
-	records, result, err := ReadAll(fs, testPath)
-	if err != nil {
-		t.Fatalf("read all: %v", err)
+	if _, _, err := ReadAll(fs, testPath); !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("read all error = %v, want ErrCorruptRecord", err)
 	}
-	if !result.TruncatedTail {
-		t.Fatal("truncated tail not reported")
+	if _, err := Open(Options{FS: fs, Path: testPath}); !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("open error = %v, want ErrCorruptRecord", err)
 	}
-	if len(records) != 4 {
-		t.Fatalf("read %d records, want 4", len(records))
+}
+
+func TestOverflowingTrailingVarintIsRejected(t *testing.T) {
+	fs := disk.NewMemFS()
+	data := append(EmptyFile(1), recordKindPut)
+	data = append(data, bytes.Repeat([]byte{0xff}, binary.MaxVarintLen64)...)
+	rewriteBytes(t, fs, testPath, data)
+
+	if _, _, err := ReadAll(fs, testPath); !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("read all error = %v, want ErrCorruptRecord", err)
+	}
+	if _, err := Open(Options{FS: fs, Path: testPath}); !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("open error = %v, want ErrCorruptRecord", err)
 	}
 }
 

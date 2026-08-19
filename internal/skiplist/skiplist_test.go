@@ -28,6 +28,22 @@ func TestReadPut(t *testing.T) {
 	}
 }
 
+func TestApplyOwnsInsertedKey(t *testing.T) {
+	list := NewSkipList(42)
+	key := []byte("alpha")
+
+	list.Apply(key, ops.NewPut([]byte("stable")))
+	copy(key, "omega")
+
+	got, ok := list.Read([]byte("alpha"))
+	if !ok || got.Kind != ops.OpPut || string(got.Data) != "stable" {
+		t.Fatalf("read original key = %#v, %v; want put(stable), true", got, ok)
+	}
+	if _, ok := list.Read([]byte("omega")); ok {
+		t.Fatal("mutating caller key changed the inserted key")
+	}
+}
+
 func TestOperationAPI(t *testing.T) {
 	list := NewSkipList(42)
 

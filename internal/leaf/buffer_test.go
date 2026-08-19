@@ -81,6 +81,14 @@ func TestBufferEstimatedBytesTracksUniformWrites(t *testing.T) {
 	}
 }
 
+func TestBufferRetainedBytesChargesKeysAndTombstones(t *testing.T) {
+	buffer := NewBuffer(42)
+	buffer.Delete([]byte("small-key"))
+	if got := buffer.RetainedBytes(); got <= int64(len("small-key")) {
+		t.Fatalf("retained bytes for tombstone = %d, want key plus node overhead", got)
+	}
+}
+
 func TestBufferDataBytesScenarios(t *testing.T) {
 	tests := []struct {
 		name string
@@ -407,6 +415,42 @@ func TestBufferFreezeRejectsExistingFrozen(t *testing.T) {
 	}
 	if buffer.FrozenLen() != 1 {
 		t.Fatalf("frozen len after rejected freeze = %d, want 1", buffer.FrozenLen())
+	}
+}
+
+func TestBufferRollbackFrozenPreservesGenerationOrder(t *testing.T) {
+	buffer := NewBuffer(42)
+	buffer.Put([]byte("old-only"), []byte("old"))
+	buffer.Inc([]byte("counter"), 2)
+	if !buffer.Freeze() {
+		t.Fatal("freeze returned false")
+	}
+
+	buffer.Put([]byte("new-only"), []byte("new"))
+	buffer.Inc([]byte("counter"), 3)
+	buffer.Put([]byte("old-only"), []byte("newer"))
+
+	if !buffer.RollbackFrozen() {
+		t.Fatal("rollback returned false")
+	}
+	if buffer.FrozenLen() != 0 {
+		t.Fatalf("frozen len after rollback = %d, want 0", buffer.FrozenLen())
+	}
+	if !buffer.Freeze() {
+		t.Fatal("freeze after rollback returned false")
+	}
+
+	oldOnly, ok := buffer.ReadFrozen([]byte("old-only"))
+	if !ok || string(oldOnly.Data) != "newer" {
+		t.Fatalf("old-only after rollback = %#v, %v; want put(newer), true", oldOnly, ok)
+	}
+	newOnly, ok := buffer.ReadFrozen([]byte("new-only"))
+	if !ok || string(newOnly.Data) != "new" {
+		t.Fatalf("new-only after rollback = %#v, %v; want put(new), true", newOnly, ok)
+	}
+	counter, ok := buffer.ReadFrozen([]byte("counter"))
+	if !ok || counter.Kind != ops.OpInc || ops.DecodeInc(counter) != 5 {
+		t.Fatalf("counter after rollback = %#v, %v; want inc(5), true", counter, ok)
 	}
 }
 

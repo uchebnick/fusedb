@@ -272,7 +272,7 @@ func (l *Leaf) BufferedBytes() int64 {
 	if l == nil {
 		return 0
 	}
-	return l.buffer.EstimatedBytes()
+	return l.buffer.RetainedBytes()
 }
 
 func (l *Leaf) Merge(opts segment.Options) error {

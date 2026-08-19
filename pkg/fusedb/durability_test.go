@@ -822,6 +822,33 @@ func TestCallerBuffersAreNotAliased(t *testing.T) {
 	}
 }
 
+func TestCallerKeyBufferIsOwnedAcrossCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	db := openDB(t, dir)
+
+	keyBacking := []byte("KEY-and-reusable-scratch")
+	if err := db.Put(keyBacking[:3], []byte("stable")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	copy(keyBacking[:3], "BAD")
+	if err := db.Merge(); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened := openDB(t, dir)
+	defer reopened.Close()
+	value, found, err := reopened.Get([]byte("KEY"))
+	if err != nil || !found || string(value) != "stable" {
+		t.Fatalf("original key after reopen = (%q,%v,%v), want (stable,true,nil)", value, found, err)
+	}
+	if _, found, err := reopened.Get([]byte("BAD")); err != nil || found {
+		t.Fatalf("mutated scratch key after reopen = (%v,%v), want (false,nil)", found, err)
+	}
+}
+
 // TestStatsReportProgress is a light sanity check that the reported buffer size
 // actually tracks writes and merges.
 func TestStatsReportProgress(t *testing.T) {

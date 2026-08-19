@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -12,6 +13,86 @@ import (
 	"github.com/uchebnick/fusedb/internal/faultfs"
 	"github.com/uchebnick/fusedb/internal/limits"
 )
+
+type syncGateFS struct {
+	disk.FS
+	mu      sync.Mutex
+	armed   bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (f *syncGateFS) arm() (<-chan struct{}, chan<- struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.armed = true
+	f.entered = make(chan struct{})
+	f.release = make(chan struct{})
+	return f.entered, f.release
+}
+
+func (f *syncGateFS) OpenReadWrite(name string) (disk.File, error) {
+	file, err := f.FS.OpenReadWrite(name)
+	if err != nil {
+		return nil, err
+	}
+	return &syncGateFile{File: file, fs: f}, nil
+}
+
+type syncGateFile struct {
+	disk.File
+	fs *syncGateFS
+}
+
+func (f *syncGateFile) Sync() error {
+	f.fs.mu.Lock()
+	if !f.fs.armed {
+		f.fs.mu.Unlock()
+		return f.File.Sync()
+	}
+	f.fs.armed = false
+	entered := f.fs.entered
+	release := f.fs.release
+	f.fs.mu.Unlock()
+	close(entered)
+	<-release
+	return f.File.Sync()
+}
+
+type uncertainSyncDirFS struct {
+	disk.FS
+	mu      sync.Mutex
+	armed   bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (f *uncertainSyncDirFS) arm() (<-chan struct{}, chan<- struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.armed = true
+	f.entered = make(chan struct{})
+	f.release = make(chan struct{})
+	return f.entered, f.release
+}
+
+func (f *uncertainSyncDirFS) SyncDir(dir string) error {
+	f.mu.Lock()
+	if !f.armed {
+		f.mu.Unlock()
+		return f.FS.SyncDir(dir)
+	}
+	f.armed = false
+	entered := f.entered
+	release := f.release
+	f.mu.Unlock()
+	close(entered)
+	<-release
+	if err := f.FS.SyncDir(dir); err != nil {
+		return err
+	}
+	return syscall.EIO
+}
 
 func TestIterateRejectsOversizedRecordBeforeAllocation(t *testing.T) {
 	data := EmptyFile(1)
@@ -163,6 +244,99 @@ func TestAsyncWALSyncFailureIsObservableAndTerminal(t *testing.T) {
 	}
 	if result.Count != 1 {
 		t.Fatalf("visible records = %d, want 1", result.Count)
+	}
+}
+
+func TestTruncateDoesNotAdvancePastConcurrentActiveRecord(t *testing.T) {
+	base := disk.NewMemFS()
+	fs := &syncGateFS{FS: base}
+	w, err := Open(Options{
+		FS:                  fs,
+		Path:                "db/wal.log",
+		SyncWrites:          false,
+		GroupCommitInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq, err := w.AppendPut([]byte("first"), []byte("one")); err != nil || seq != 1 {
+		t.Fatalf("first append = (%d,%v)", seq, err)
+	}
+
+	entered, release := fs.arm()
+	truncateDone := make(chan error, 1)
+	go func() { truncateDone <- w.Truncate(^uint64(0)) }()
+	<-entered
+
+	if seq, err := w.AppendPut([]byte("concurrent"), []byte("two")); err != nil || seq != 2 {
+		t.Fatalf("concurrent append = (%d,%v)", seq, err)
+	}
+	close(release)
+	if err := <-truncateDone; err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if got := w.BaseSeq(); got != 2 {
+		t.Fatalf("base seq = %d, want 2", got)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatalf("sync concurrent record: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	records, result, err := ReadAll(base, "db/wal.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.BaseSeq != 2 || len(records) != 1 || records[0].Seq != 2 || string(records[0].Key) != "concurrent" {
+		t.Fatalf("records after concurrent truncate = %+v, result=%+v", records, result)
+	}
+}
+
+func TestCommitUncertainRotationPoisonsQueuedSyncWrite(t *testing.T) {
+	base := disk.NewMemFS()
+	fs := &uncertainSyncDirFS{FS: base}
+	w, err := Open(Options{FS: fs, Path: "db/wal.log", SyncWrites: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.AppendPut([]byte("first"), []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+
+	entered, release := fs.arm()
+	truncateDone := make(chan error, 1)
+	go func() { truncateDone <- w.Truncate(1) }()
+	<-entered
+
+	appendDone := make(chan error, 1)
+	go func() {
+		_, err := w.AppendPut([]byte("queued"), []byte("must-not-be-acked"))
+		appendDone <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for w.LastSeq() != 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if w.LastSeq() != 2 {
+		t.Fatal("queued append was not staged")
+	}
+	close(release)
+
+	truncateErr := <-truncateDone
+	if !errors.Is(truncateErr, ErrPersistence) || !errors.Is(truncateErr, disk.ErrCommitUncertain) {
+		t.Fatalf("truncate error = %v, want terminal commit-uncertain", truncateErr)
+	}
+	appendErr := <-appendDone
+	if !errors.Is(appendErr, ErrPersistence) || !errors.Is(appendErr, disk.ErrCommitUncertain) {
+		t.Fatalf("queued append error = %v, want terminal commit-uncertain", appendErr)
+	}
+	if _, err := w.AppendPut([]byte("later"), []byte("no")); !errors.Is(err, ErrPersistence) {
+		t.Fatalf("append after uncertain rotation = %v", err)
+	}
+	if err := w.Close(); !errors.Is(err, ErrPersistence) {
+		t.Fatalf("close error = %v, want terminal persistence error", err)
 	}
 }
 

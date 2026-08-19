@@ -14,7 +14,15 @@ import (
 // rate collapsed to roughly zero. Sharding the counter by key hash confines a
 // write to one shard, so a write to one key leaves the other shards' entries
 // usable. It costs one array of counters and keeps the read path lock-free.
-const cacheEpochShards = 256
+const (
+	cacheEpochShards = 256
+	// cacheEntryOverhead conservatively covers the retained string/slice
+	// headers, cacheEntry fields, map bucket share, pointers, and allocator
+	// rounding. Exact Go heap accounting is runtime-specific, but charging only
+	// payload bytes lets millions of tiny entries exceed the configured budget
+	// by an order of magnitude.
+	cacheEntryOverhead int64 = 160
+)
 
 type valueCache struct {
 	mu       sync.RWMutex
@@ -63,7 +71,7 @@ func (c *valueCache) set(key, value []byte, epoch uint64) {
 	if c == nil {
 		return
 	}
-	size := int64(len(key) + len(value))
+	size := int64(len(key)+len(value)) + cacheEntryOverhead
 	if size > c.maxBytes {
 		c.delete(key)
 		return

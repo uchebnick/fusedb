@@ -32,9 +32,10 @@ func (r *Reader) Verify(ctx context.Context) (VerifyReport, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if r == nil || r.segment == nil || r.closed.Load() {
+	if !r.acquire() {
 		return VerifyReport{}, ErrNilSegment
 	}
+	defer r.release()
 
 	report := VerifyReport{DataBytes: r.segment.Footer.Data.Length}
 	entries := r.segment.Index.Entries()

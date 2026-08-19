@@ -152,6 +152,10 @@ type DB struct {
 	// operations on the same key. It also makes Inc type validation atomic with
 	// its WAL append. Different shards remain fully concurrent.
 	mutationMu [mutationLockShards]sync.Mutex
+	// lifecycleMu is the admission gate for public operations. A foreground
+	// call holds the read side for its complete lifetime; Close takes the write
+	// side before the final checkpoint and resource teardown.
+	lifecycleMu sync.RWMutex
 
 	walBytes atomic.Int64
 
@@ -468,6 +472,13 @@ func OpenDB(opts DBOptions) (*DB, error) {
 		if loaded != nil {
 			appliedSeq = loaded.AppliedSeq
 		}
+		if log.BaseSeq() > appliedSeq+1 {
+			_ = log.Close()
+			_ = leafTree.Close()
+			closeRegistry(registry)
+			return nil, fmt.Errorf("%w: WAL base sequence %d is beyond durable sequence %d",
+				ErrCorruption, log.BaseSeq(), appliedSeq)
+		}
 		if err := db.replayWAL(walPath, appliedSeq); err != nil {
 			_ = log.Close()
 			_ = leafTree.Close()
@@ -605,6 +616,10 @@ type BackupReport struct {
 // with merges and dictionary maintenance. Foreground reads and writes may
 // continue once the short buffer freeze at the checkpoint boundary completes.
 func (db *DB) Backup(ctx context.Context, archivePath string) (BackupReport, error) {
+	if err := db.beginForeground(); err != nil {
+		return BackupReport{}, err
+	}
+	defer db.endForeground()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -797,6 +812,10 @@ func pathWithin(dir, name string) (bool, error) {
 // maintenance job. Foreground pressure may cancel it with context.Canceled;
 // callers can retry when the database is quiet.
 func (db *DB) Verify(ctx context.Context) (VerifyReport, error) {
+	if err := db.beginForeground(); err != nil {
+		return VerifyReport{}, err
+	}
+	defer db.endForeground()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1111,6 +1130,10 @@ func closeRegistry(registry *compression.Registry) {
 }
 
 func (db *DB) Put(key, value []byte) error {
+	if err := db.beginForeground(); err != nil {
+		return err
+	}
+	defer db.endForeground()
 	started := db.telemetry.BeginWrite()
 	defer db.telemetry.EndWrite(started)
 
@@ -1148,6 +1171,10 @@ func (db *DB) Put(key, value []byte) error {
 }
 
 func (db *DB) Get(key []byte) ([]byte, bool, error) {
+	if err := db.beginForeground(); err != nil {
+		return nil, false, err
+	}
+	defer db.endForeground()
 	started := db.telemetry.BeginRead()
 	defer db.telemetry.EndRead(started)
 
@@ -1184,6 +1211,10 @@ func (db *DB) Get(key []byte) ([]byte, bool, error) {
 }
 
 func (db *DB) Delete(key []byte) error {
+	if err := db.beginForeground(); err != nil {
+		return err
+	}
+	defer db.endForeground()
 	started := db.telemetry.BeginWrite()
 	defer db.telemetry.EndWrite(started)
 
@@ -1221,6 +1252,10 @@ func (db *DB) Delete(key []byte) error {
 }
 
 func (db *DB) Inc(key []byte, delta int64) error {
+	if err := db.beginForeground(); err != nil {
+		return err
+	}
+	defer db.endForeground()
 	started := db.telemetry.BeginWrite()
 	defer db.telemetry.EndWrite(started)
 
@@ -1307,6 +1342,10 @@ func (db *DB) noteWALGrowth(n int) {
 // up to the merged watermark. The call waits for that mandatory job so manual
 // and automatic maintenance can never execute concurrently.
 func (db *DB) Merge() error {
+	if err := db.beginForeground(); err != nil {
+		return err
+	}
+	defer db.endForeground()
 	if db == nil || db.background == nil {
 		return errors.New("fusedb: database is not open")
 	}
@@ -1324,7 +1363,7 @@ func (db *DB) Merge() error {
 	job.Mandatory = func() bool { return true }
 	job.Needed = nil
 	job.OnDone = func(err error) {
-		db.backgroundJobDone(err)
+		db.mergeJobDone(err)
 		done <- err
 	}
 	if !db.background.Submit(job) {
@@ -1369,9 +1408,12 @@ func (db *DB) checkpoint() error {
 //
 // This is the common path and deliberately does not move the log watermark:
 // only some leaves are merged, so records for the others are still needed.
-func (db *DB) mergeLeaves() error {
+func (db *DB) mergeLeaves(ctx context.Context) error {
 	pending := db.tree.PendingMerge()
 	for _, l := range pending {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		db.applyMu.Lock()
 		watermark := db.walLastSeq()
 		l.FreezeBuffer()
@@ -1401,6 +1443,8 @@ func (db *DB) close(runCheckpoint bool) error {
 
 	var err error
 	db.closeOnce.Do(func() {
+		db.lifecycleMu.Lock()
+		defer db.lifecycleMu.Unlock()
 		db.closed.Store(true)
 		if db.background != nil {
 			_ = db.background.Close()
@@ -1450,6 +1494,22 @@ func (db *DB) close(runCheckpoint bool) error {
 		}
 	})
 	return err
+}
+
+func (db *DB) beginForeground() error {
+	if db == nil {
+		return errors.New("fusedb: database is not open")
+	}
+	db.lifecycleMu.RLock()
+	if db.closed.Load() {
+		db.lifecycleMu.RUnlock()
+		return errors.New("fusedb: database is closed")
+	}
+	return nil
+}
+
+func (db *DB) endForeground() {
+	db.lifecycleMu.RUnlock()
 }
 
 // BufferedBytes reports how many bytes of buffered operations are unmerged.
@@ -1559,7 +1619,7 @@ func (db *DB) newCheckpointJob() scheduler.Job {
 			Interference:   0.80,
 		},
 		Mandatory: func() bool {
-			return db.walBytes.Load() >= db.checkpointBytes
+			return db.walBytes.Load()/db.checkpointBytes >= 4
 		},
 		Needed: func() bool {
 			return db.backgroundErr() == nil && db.walBytes.Load() >= db.checkpointBytes
@@ -1573,7 +1633,7 @@ func (db *DB) newCheckpointJob() scheduler.Job {
 			}
 			return db.checkpoint()
 		},
-		OnDone: db.backgroundJobDone,
+		OnDone: db.mergeJobDone,
 	}
 }
 
@@ -1589,6 +1649,7 @@ func (db *DB) newMergeJob() scheduler.Job {
 			MemoryFraction: 0.10,
 			Interference:   0.60,
 		},
+		Preemptible: true,
 		Mandatory: func() bool {
 			return db.tree.BufferedBytes() >= 4*db.thresholdBytes
 		},
@@ -1602,15 +1663,21 @@ func (db *DB) newMergeJob() scheduler.Job {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			return db.mergeLeaves()
+			return db.mergeLeaves(ctx)
 		},
-		OnDone: db.backgroundJobDone,
+		OnDone: db.mergeJobDone,
+	}
+}
+
+func (db *DB) mergeJobDone(err error) {
+	db.backgroundJobDone(err)
+	if err == nil {
+		db.requestDictionaryGC()
 	}
 }
 
 func (db *DB) backgroundJobDone(err error) {
 	if err == nil {
-		db.requestDictionaryGC()
 		return
 	}
 	if errors.Is(err, context.Canceled) {

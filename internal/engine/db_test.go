@@ -25,6 +25,94 @@ import (
 	"github.com/uchebnick/fusedb/internal/wal"
 )
 
+type closeCheckpointGateFS struct {
+	disk.FS
+	mu      sync.Mutex
+	armed   bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (f *closeCheckpointGateFS) arm() (<-chan struct{}, chan<- struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.armed = true
+	f.entered = make(chan struct{})
+	f.release = make(chan struct{})
+	return f.entered, f.release
+}
+
+func (f *closeCheckpointGateFS) SyncDir(dir string) error {
+	f.mu.Lock()
+	if !f.armed {
+		f.mu.Unlock()
+		return f.FS.SyncDir(dir)
+	}
+	f.armed = false
+	entered := f.entered
+	release := f.release
+	f.mu.Unlock()
+	close(entered)
+	<-release
+	return f.FS.SyncDir(dir)
+}
+
+func TestCloseExcludesWritesAfterFinalFreeze(t *testing.T) {
+	fs := &closeCheckpointGateFS{FS: disk.NewMemFS()}
+	opts := DBOptions{
+		Dir:                              "close-admission",
+		FS:                               fs,
+		DisableWAL:                       true,
+		ThresholdBytes:                   1 << 30,
+		DisableSchedulerModelPersistence: true,
+		DictionaryTraining:               DictionaryTrainingConfig{Disabled: true},
+		DictionaryGC:                     DictionaryGCConfig{Disabled: true},
+	}
+	db, err := OpenDB(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Put([]byte("before-close"), []byte("stable")); err != nil {
+		t.Fatal(err)
+	}
+
+	entered, release := fs.arm()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- db.Close() }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close did not reach checkpoint commit")
+	}
+
+	putDone := make(chan error, 1)
+	go func() { putDone <- db.Put([]byte("after-freeze"), []byte("must-not-ack")) }()
+	select {
+	case err := <-putDone:
+		t.Fatalf("write escaped close admission gate: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-closeDone; err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := <-putDone; err == nil {
+		t.Fatal("write that started during close was acknowledged")
+	}
+
+	reopened, err := OpenDB(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if value, found, err := reopened.Get([]byte("before-close")); err != nil || !found || string(value) != "stable" {
+		t.Fatalf("durable pre-close write = (%q,%v,%v)", value, found, err)
+	}
+	if _, found, err := reopened.Get([]byte("after-freeze")); err != nil || found {
+		t.Fatalf("post-freeze write after reopen = (%v,%v), want missing", found, err)
+	}
+}
+
 func TestRejectedMutationsNeverEnterWAL(t *testing.T) {
 	fs := disk.NewMemFS()
 	dir := "rejected-mutations"
@@ -1101,6 +1189,33 @@ func TestPartialLeafMergeDoesNotReplayIncrementTwice(t *testing.T) {
 	cancel()
 	if _, err := reopened.Verify(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled verify = %v, want context.Canceled", err)
+	}
+}
+
+func TestOpenRejectsWALBaseBeyondDurableManifest(t *testing.T) {
+	fs := disk.NewMemFS()
+	opts := DBOptions{
+		Dir:                              "wal-base-gap",
+		FS:                               fs,
+		WALSyncWrites:                    true,
+		DisableSchedulerModelPersistence: true,
+		DictionaryTraining:               DictionaryTrainingConfig{Disabled: true},
+		DictionaryGC:                     DictionaryGCConfig{Disabled: true},
+	}
+	db, err := OpenDB(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	walPath := filepath.Join(opts.Dir, "wal.log")
+	if err := disk.WriteFileAtomically(fs, walPath, wal.EmptyFile(2)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenDB(opts); !errors.Is(err, ErrCorruption) {
+		t.Fatalf("open error = %v, want ErrCorruption", err)
 	}
 }
 

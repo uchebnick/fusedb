@@ -3,6 +3,7 @@ package segment
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/uchebnick/fusedb/internal/compression"
@@ -18,6 +19,7 @@ var (
 // Reader provides point-lookups over one frozen immutable segment.
 type Reader struct {
 	segment    *Segment
+	lifecycle  sync.RWMutex
 	file       disk.File
 	dictionary *compression.Dictionary
 	closed     atomic.Bool
@@ -93,9 +95,10 @@ func (r *Reader) MayContain(key []byte) bool {
 
 // Get performs a point lookup.
 func (r *Reader) Get(key []byte) ([]byte, bool, error) {
-	if r == nil || r.segment == nil || r.closed.Load() {
+	if !r.acquire() {
 		return nil, false, ErrNilSegment
 	}
+	defer r.release()
 	if !r.segment.Bloom.MayContain(key) {
 		return nil, false, nil
 	}
@@ -113,7 +116,12 @@ func (r *Reader) Get(key []byte) ([]byte, bool, error) {
 // Close is safe to call concurrently with lookups and is idempotent: only the
 // goroutine that wins the closed flag closes the underlying file.
 func (r *Reader) Close() error {
-	if r == nil || !r.closed.CompareAndSwap(false, true) {
+	if r == nil {
+		return nil
+	}
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	if !r.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 	if r.file == nil {
@@ -122,6 +130,22 @@ func (r *Reader) Close() error {
 	err := r.file.Close()
 	r.file = nil
 	return err
+}
+
+func (r *Reader) acquire() bool {
+	if r == nil {
+		return false
+	}
+	r.lifecycle.RLock()
+	if r.segment == nil || r.closed.Load() {
+		r.lifecycle.RUnlock()
+		return false
+	}
+	return true
+}
+
+func (r *Reader) release() {
+	r.lifecycle.RUnlock()
 }
 
 func (r *Reader) readBlock(entry BlockIndexEntry) (Block, error) {
@@ -215,16 +239,16 @@ func (r *Reader) readBlockValue(entry BlockIndexEntry, key []byte) ([]byte, bool
 	return valueCopy, ok, nil
 }
 
-func (r *Reader) readBlockPayload(entry BlockIndexEntry) (*PooledBuffer, error) {
+func (r *Reader) readBlockPayload(entry BlockIndexEntry) (PooledBuffer, error) {
 	if r == nil || r.segment == nil || r.closed.Load() {
-		return nil, ErrNilSegment
+		return PooledBuffer{}, ErrNilSegment
 	}
 	section, err := r.segment.blockSection(entry)
 	if err != nil {
-		return nil, err
+		return PooledBuffer{}, err
 	}
 	if r.file == nil {
-		return nil, ErrReaderFileNotOpen
+		return PooledBuffer{}, ErrReaderFileNotOpen
 	}
 	return readSectionFrom(r.file, section)
 }

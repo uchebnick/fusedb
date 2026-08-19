@@ -3,11 +3,28 @@ package segment
 import (
 	"bytes"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/uchebnick/fusedb/internal/compression"
 	"github.com/uchebnick/fusedb/internal/disk"
 )
+
+type blockingReadAtFile struct {
+	disk.File
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingReadAtFile) ReadAt(p []byte, off int64) (int, error) {
+	f.once.Do(func() {
+		close(f.entered)
+		<-f.release
+	})
+	return f.File.ReadAt(p, off)
+}
 
 func TestReaderGetRaw(t *testing.T) {
 	fs := disk.NewMemFS()
@@ -62,6 +79,68 @@ func TestReaderGetRaw(t *testing.T) {
 		t.Fatalf("missing lookup = (%q, %v), want nil,false", value, ok)
 	}
 
+}
+
+func TestReaderCloseWaitsForInFlightLookup(t *testing.T) {
+	fs := disk.NewMemFS()
+	segment, err := NewSegment(Options{
+		FS:                 fs,
+		Dir:                "segments",
+		SegmentID:          399,
+		Version:            1,
+		ExpectedKeys:       1,
+		TargetBlockSize:    64,
+		BloomFalsePositive: 0.01,
+		Compression:        CompressionNone,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := segment.Append(BlockEntry{Key: []byte("alpha"), Value: []byte("stable")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := segment.Freeze(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewReader(segment, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &blockingReadAtFile{
+		File:    reader.file,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	reader.file = gate
+
+	getDone := make(chan error, 1)
+	go func() {
+		value, ok, err := reader.Get([]byte("alpha"))
+		if err == nil && (!ok || string(value) != "stable") {
+			err = errors.New("lookup returned the wrong value")
+		}
+		getDone <- err
+	}()
+	<-gate.entered
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- reader.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("close completed while ReadAt was active: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(gate.release)
+	if err := <-getDone; err != nil {
+		t.Fatalf("in-flight lookup: %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, _, err := reader.Get([]byte("alpha")); !errors.Is(err, ErrNilSegment) {
+		t.Fatalf("lookup after close = %v, want ErrNilSegment", err)
+	}
 }
 
 func TestReaderIteratorRaw(t *testing.T) {

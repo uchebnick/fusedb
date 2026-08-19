@@ -282,20 +282,20 @@ func validateSegmentLayout(fileSize uint64, footer Footer) error {
 	return nil
 }
 
-func readSectionFrom(r io.ReaderAt, section Section) (*PooledBuffer, error) {
+func readSectionFrom(r io.ReaderAt, section Section) (PooledBuffer, error) {
 	if section.Length == 0 {
-		return &PooledBuffer{Data: []byte{}}, nil
+		return PooledBuffer{}, nil
 	}
 	if section.Length > uint64(maxInt()) {
-		return nil, ErrSegmentSectionTooBig
+		return PooledBuffer{}, ErrSegmentSectionTooBig
 	}
 	if section.Offset > uint64(maxInt64()) {
-		return nil, ErrSegmentSectionTooBig
+		return PooledBuffer{}, ErrSegmentSectionTooBig
 	}
 	return readFullAt(r, int64(section.Offset), int(section.Length))
 }
 
-func readFullAt(r io.ReaderAt, off int64, size int) (*PooledBuffer, error) {
+func readFullAt(r io.ReaderAt, off int64, size int) (PooledBuffer, error) {
 	bufPtr := blockBufPool.Get().(*[]byte)
 	poolBuf := *bufPtr
 
@@ -316,7 +316,7 @@ func readFullAt(r io.ReaderAt, off int64, size int) (*PooledBuffer, error) {
 		}
 		if err != nil {
 			blockBufPool.Put(bufPtr)
-			return nil, err
+			return PooledBuffer{}, err
 		}
 		if n == 0 {
 			break
@@ -324,10 +324,10 @@ func readFullAt(r io.ReaderAt, off int64, size int) (*PooledBuffer, error) {
 	}
 	if read != size {
 		blockBufPool.Put(bufPtr)
-		return nil, io.ErrUnexpectedEOF
+		return PooledBuffer{}, io.ErrUnexpectedEOF
 	}
 
-	return &PooledBuffer{
+	return PooledBuffer{
 		Data:   buf[:read],
 		bufPtr: bufPtr,
 	}, nil

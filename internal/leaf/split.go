@@ -57,8 +57,8 @@ func (l *Leaf) MergeSplit(opts SplitOptions) ([]MergeResult, error) {
 		return nil, fmt.Errorf("leaf: merge split requires an allocator")
 	}
 
-	// A false result means an earlier merge failed after freezing. Reusing that
-	// frozen layer is required for progress.
+	// A false result means the caller already froze the exact generation (the
+	// engine does this while capturing its WAL watermark).
 	// FreezeBuffer excludes writers around the active/frozen swap. Calling the
 	// buffer primitive directly lets a writer retain the old active list and
 	// publish into it after the merge iterator has passed that key.

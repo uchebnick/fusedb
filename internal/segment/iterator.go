@@ -48,10 +48,11 @@ func (r *Reader) IterFromWithErr(target []byte) (iter.Seq2[[]byte, []byte], func
 	var iterErr error
 
 	seq := func(yield func([]byte, []byte) bool) {
-		if r == nil || r.segment == nil || r.closed.Load() {
+		if !r.acquire() {
 			iterErr = ErrNilSegment
 			return
 		}
+		defer r.release()
 
 		blockIndex := 0
 		seek := target != nil

@@ -2,13 +2,16 @@ package tree
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/faultfs"
 	"github.com/uchebnick/fusedb/internal/manifest"
 	"github.com/uchebnick/fusedb/internal/value"
 )
@@ -391,6 +394,53 @@ func TestOpenRoundTrip(t *testing.T) {
 	checkLeafLayout(t, reopened)
 	checkManifest(t, fs)
 	checkRange(t, reopened, 0, 6, 256)
+}
+
+func TestFailedMergeRollsFrozenGenerationBackBeforeRetry(t *testing.T) {
+	base := disk.NewMemFS()
+	fs := faultfs.New(base)
+	tree := newTestTree(t, testOptions(fs))
+
+	if err := tree.Put([]byte("before-freeze"), []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	l := tree.Leaves()[0]
+	if !l.FreezeBuffer() {
+		t.Fatal("initial freeze returned false")
+	}
+	// This write represents a WAL record appended while the frozen generation
+	// is being merged.
+	if err := tree.Put([]byte("after-freeze"), []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+
+	fs.Arm(faultfs.Rule{
+		Operation:  faultfs.OpRename,
+		PathSuffix: "MANIFEST",
+		Err:        syscall.EIO,
+	})
+	if err := tree.MergeLeafThrough(l, 1); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("failed merge error = %v, want EIO", err)
+	}
+	fs.Disarm()
+
+	if !l.FreezeBuffer() {
+		t.Fatal("retry freeze returned false; failed generation was not rolled back")
+	}
+	if err := tree.MergeLeafThrough(l, 2); err != nil {
+		t.Fatalf("retry merge: %v", err)
+	}
+
+	if got := string(mustGet(t, tree, []byte("before-freeze"))); got != "old" {
+		t.Fatalf("before-freeze = %q, want old", got)
+	}
+	if got := string(mustGet(t, tree, []byte("after-freeze"))); got != "new" {
+		t.Fatalf("after-freeze = %q, want new", got)
+	}
+	gotManifest := tree.Manifest()
+	if len(gotManifest.Leaves) != 1 || gotManifest.Leaves[0].AppliedSeq != 2 {
+		t.Fatalf("retry manifest = %+v, want leaf watermark 2", gotManifest)
+	}
 }
 
 func TestDeleteSurvivesMerge(t *testing.T) {
