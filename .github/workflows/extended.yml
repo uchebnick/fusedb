@@ -1,0 +1,97 @@
+name: Extended checks
+
+on:
+  push:
+    branches: [main]
+  schedule:
+  - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reliability:
+    name: Crash, fuzz, monitoring, qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
+
+    - name: Install native LZ4
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y liblz4-dev
+
+    - name: Run process-crash recovery matrix
+      run: make test-crash
+
+    - name: Run persisted-decoder fuzz smoke tests
+      run: make test-fuzz FUZZTIME=10s
+
+    - name: Validate monitoring contracts
+      run: make test-monitoring
+
+    - name: Run phased qualification smoke test
+      run: make test-qualification
+
+  platform:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - platform: linux/amd64
+          runner: ubuntu-24.04
+        - platform: linux/arm64
+          runner: ubuntu-24.04-arm
+        - platform: darwin/amd64
+          runner: macos-15-intel
+        - platform: darwin/arm64
+          runner: macos-15
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
+
+    - name: Install native LZ4
+      shell: bash
+      run: |
+        if [[ "$RUNNER_OS" == "Linux" ]]; then
+          sudo apt-get update
+          sudo apt-get install -y liblz4-dev
+        else
+          brew install lz4
+          echo "CGO_CFLAGS=-I$(brew --prefix lz4)/include" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=-L$(brew --prefix lz4)/lib" >> "$GITHUB_ENV"
+        fi
+
+    - name: Build
+      run: go build ./...
+
+    - name: Test
+      run: go test ./...

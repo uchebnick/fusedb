@@ -1,198 +1,158 @@
 name: CI
 
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
 permissions:
   contents: read
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  format:
-    name: Format
-    runs-on: ubuntu-latest
+  quality:
+    name: Format and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
-        go-version: '1.25.13'
-        cache: true
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
 
-    - name: Install goimports
-      run: go install golang.org/x/tools/cmd/goimports@v0.49.0
+    - name: Install native LZ4 and goimports
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y liblz4-dev
+        go install golang.org/x/tools/cmd/goimports@v0.49.0
 
     - name: Check formatting
       run: make check-format
 
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: ['1.25.13']
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
+    - name: Lint
+      uses: golangci/golangci-lint-action@v9
       with:
-        go-version: ${{ matrix.go-version }}
-        cache: true
-
-    - name: Download dependencies
-      run: go mod download
-
-    - name: Install native LZ4 development library
-      run: sudo apt-get update && sudo apt-get install -y liblz4-dev
-
-    - name: Run tests
-      run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
-
-    - name: Verify explicit no-CGO behavior
-      run: make test-nocgo
-
-    - name: Run repeated process-crash recovery matrix
-      run: make test-crash
-
-    - name: Run persisted-decoder fuzz smoke tests
-      run: make test-fuzz FUZZTIME=3s
-
-    - name: Validate monitoring contracts and PromQL
-      run: make test-monitoring
-
-    - name: Run phased production-qualification smoke test
-      run: make test-qualification
-
-    - name: Upload coverage
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./coverage.txt
-        flags: unittests
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.25.13'
-        cache: true
-
-    - name: Install native LZ4 development library
-      run: sudo apt-get update && sudo apt-get install -y liblz4-dev
-
-    - name: golangci-lint
-      uses: golangci/golangci-lint-action@v6
-      with:
-        version: v2.7.2
+        version: v2.12.0
         args: --timeout=5m
 
-  benchmark-module:
-    name: Benchmark module
-    runs-on: ubuntu-latest
+  test:
+    name: Tests with race detector
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
-        go-version: '1.25.13'
-        cache: true
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
+
+    - name: Install native LZ4
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y liblz4-dev
+
+    - name: Run tests
+      run: make test
+
+    - name: Verify no-CGO contract
+      run: make test-nocgo
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v7
+      with:
+        files: ./coverage.txt
+        flags: unit
+        disable_search: true
+        fail_ci_if_error: false
+
+  build:
+    name: Build library and benchmark tools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
         cache-dependency-path: |
           go.sum
           benchmarks/go.sum
 
-    - name: Install native LZ4 development library
-      run: sudo apt-get update && sudo apt-get install -y liblz4-dev
+    - name: Install native LZ4
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y liblz4-dev
 
-    - name: Build and test isolated benchmark tools
+    - name: Build packages
+      run: make build
+
+    - name: Test benchmark module
       run: make test-benchmarks
 
   security:
-    name: Supply chain
-    runs-on: ubuntu-latest
+    name: Vulnerabilities and licenses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
-        go-version: '1.25.13'
-        cache: true
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
 
-    - name: Install native LZ4 development library
-      run: sudo apt-get update && sudo apt-get install -y liblz4-dev
+    - name: Install native LZ4
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y liblz4-dev
 
-    - name: Check vulnerabilities and licenses
+    - name: Scan dependencies
       run: make security
 
-    - name: Generate CycloneDX SBOM
-      run: make sbom
-
-    - name: Upload SBOM
-      uses: actions/upload-artifact@v4
-      with:
-        name: fusedb-sbom
-        path: dist/fusedb.cdx.json
-        if-no-files-found: error
-
-  platform:
-    name: ${{ matrix.platform }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-        - platform: linux/amd64
-          runner: ubuntu-24.04
-        - platform: linux/arm64
-          runner: ubuntu-24.04-arm
-        - platform: darwin/amd64
-          runner: macos-15-intel
-        - platform: darwin/arm64
-          runner: macos-15
+  complete:
+    name: CI passed
+    if: always()
+    needs: [quality, test, build, security]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.25.13'
-        cache: true
-
-    - name: Install native LZ4 development library
-      shell: bash
+    - name: Verify required jobs
+      env:
+        QUALITY: ${{ needs.quality.result }}
+        TEST: ${{ needs.test.result }}
+        BUILD: ${{ needs.build.result }}
+        SECURITY: ${{ needs.security.result }}
       run: |
-        if [[ "$RUNNER_OS" == "Linux" ]]; then
-          sudo apt-get update
-          sudo apt-get install -y liblz4-dev
-        else
-          brew install lz4
-          echo "CGO_CFLAGS=-I$(brew --prefix lz4)/include" >> "$GITHUB_ENV"
-          echo "CGO_LDFLAGS=-L$(brew --prefix lz4)/lib" >> "$GITHUB_ENV"
-        fi
-
-    - name: Build
-      run: go build -v ./...
-
-    - name: Test platform filesystem contracts
-      run: go test ./...
+        test "$QUALITY" = success
+        test "$TEST" = success
+        test "$BUILD" = success
+        test "$SECURITY" = success
