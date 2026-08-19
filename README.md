@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="./assets/fusedb-pixel-mark.png" width="144" alt="FuseDB pixel-art ice logo">
-</p>
-
-<h1 align="center">FuseDB</h1>
+<h1 align="center">
+  <img src="./assets/fusedb-logo-metal.png" width="520" alt="FuseDB">
+</h1>
 
 <p align="center">
   An embedded key-value engine that keeps background maintenance local,
