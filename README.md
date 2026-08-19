@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/fusedb-mark.svg" width="112" alt="FuseDB logo">
+  <img src="./assets/fusedb-pixel-mark.png" width="144" alt="FuseDB pixel-art ice logo">
 </p>
 
 <h1 align="center">FuseDB</h1>
