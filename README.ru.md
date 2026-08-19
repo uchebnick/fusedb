@@ -1,83 +1,91 @@
-# FuseDB
+<p align="center">
+  <img src="./assets/fusedb-mark.svg" width="112" alt="Логотип FuseDB">
+</p>
 
-[![CI](https://github.com/uchebnick/fusedb/actions/workflows/ci.yml/badge.svg)](https://github.com/uchebnick/fusedb/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/uchebnick/fusedb/pkg/fusedb.svg)](https://pkg.go.dev/github.com/uchebnick/fusedb/pkg/fusedb)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+<h1 align="center">FuseDB</h1>
 
-Экспериментальный встраиваемый key-value движок для часто изменяемых данных с
-преобладанием чтений. FuseDB делит пространство ключей на независимо
-мерджущиеся листья, поэтому объём данных, переписываемый одним merge, остаётся
-ограниченным по мере роста базы.
+<p align="center">
+  Встраиваемая key-value база с локальными merge, адаптивным обслуживанием
+  и контролем foreground latency.
+</p>
 
-> [!WARNING]
-> FuseDB — исследовательский проект. API и дисковый формат пока нестабильны;
-> хранить production-данные в нём рано.
+<p align="center">
+  <a href="https://github.com/uchebnick/fusedb/actions/workflows/ci.yml"><img src="https://github.com/uchebnick/fusedb/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pkg.go.dev/github.com/uchebnick/fusedb/pkg/fusedb"><img src="https://pkg.go.dev/badge/github.com/uchebnick/fusedb/pkg/fusedb.svg" alt="Go Reference"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e.svg" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/status-research--stage-f59e0b.svg" alt="Исследовательская стадия">
+</p>
 
-[English](./README.md) · [Использование как библиотеки](./LIBRARY.md) ·
-[Архитектура](./ARCHITECTURE.ru.md) · [Бенчмарки](./benchmarks/RESULTS.md) ·
-[Планировщик](./docs/scheduler.md) · [Эксплуатация](./docs/operations.md) ·
-[Qualification](./docs/qualification.md) · [Мониторинг](./monitoring/prometheus/README.md) ·
-[Дисковый формат](./docs/format.md) · [Релизы](./docs/release.md) ·
-[Пилот лайков/билетов](./docs/pilot-likes-tickets.ru.md) ·
-[Detailed English wiki](./docs/pilot-likes-tickets.md) ·
-[Участие в разработке](./CONTRIBUTING.md)
+<p align="center">
+  <a href="./README.md">English</a> ·
+  <a href="./LIBRARY.md">API</a> ·
+  <a href="./ARCHITECTURE.ru.md">Архитектура</a> ·
+  <a href="./benchmarks/README.md">Бенчмарки</a> ·
+  <a href="./docs/README.md">Документация</a>
+</p>
 
-## Зачем FuseDB?
+> [!IMPORTANT]
+> FuseDB находится на исследовательской стадии: API и дисковый формат ещё могут
+> меняться. Её можно использовать для экспериментов и перестраиваемых
+> проекций, но не как единственный источник истины для платежей, inventory и
+> других невосстановимых данных.
 
-Движок с одним сегментом со временем вынужден переписывать весь набор данных на
-каждом merge. FuseDB направляет каждый ключ в лист со своим изменяемым буфером и
-иммутабельным сегментом. Листья мерджатся и делятся независимо.
+## Идея
 
-- Point-read без глобальной блокировки чтения
-- Локальные merge с настраиваемым ограничением размера листа
-- Атомарный `int64`-инкремент с точным однократным replay после рестарта
-- Условные multi-key write batches и идемпотентная обработка событий одним
-  WAL-record для атомарного обновления membership + materialized counter
-- WAL recovery, контрольные суммы и атомарная замена manifest
-- Bounded decoders и лимиты записи: повреждённые размеры отвергаются до
-  аллокации, а порядок одного ключа совпадает в WAL и live state
-- Terminal fencing ошибок WAL: failed/uncertain persistence блокирует handle до
-  reopen и не допускает небезопасный checkpoint
-- Checksummed `FORMAT`-gate с ранним отказом для новых/неизвестных обязательных
-  features и атомарной миграцией manifest v2/v3
-- Эксклюзивная crash-safe блокировка каталога базы между процессами
-- Startup-reconciliation завершённых и временных segment-файлов без ссылок из manifest
-- Subprocess crash-матрица с убийством процесса на границах commit WAL,
-  segment, manifest и WAL rotation и проверкой точного восстановления счётчика
-- Полная `Verify`-проверка manifest, WAL, CRC блоков, диапазонов ключей, bloom
-  и ссылок на LZ4-словари
-- Онлайн point-in-time backup/restore с потоковыми контрольными суммами и
-  полной проверкой восстановленной базы
-- Адаптивный допуск merge с защитой foreground p95/p99
-- Checksummed UTC-модель недельной нагрузки, переживающая restart и backup
-- Адаптивное LZ4-обучение по группам листьев на реальных merged-блоках:
-  held-out evaluation, кооперативная отмена и durable publication
-- Reference-safe GC старых словарей, ограниченный и прерываемый тем же
-  планировщиком, что merge и backup
-- Автоопределение доступных CPU/RAM и обучение эффективной пропускной
-  способности диска с возможностью явно задать каждый бюджет
-- Опциональный низкокардинальный Prometheus collector, readiness-контракт,
-  recording rules и примеры production-алертов
-- Bounded phased qualification runner с p95/p99 gates, измерением maintenance
-  debt, полным Verify, close/reopen и точной проверкой counters
-- Иммутабельные сжатые сегменты с bloom filter и блочным индексом
-- Безопасное владение байтовыми слайсами: запись не удерживает память
-  вызывающего, чтение возвращает копию
+Большой compaction способен превратить быструю embedded-базу в
+непредсказуемую. FuseDB делит keyspace на независимо обслуживаемые листья.
+Каждый лист владеет mutable-буфером и одним immutable-сегментом, поэтому merge
+переписывает ограниченный локальный диапазон, а не всю базу.
 
-Текущий scope намеренно узкий: точечные операции и атомарные write batches над
-одной локальной базой. Общих read/write-транзакций, transactional read snapshots,
-range scans, репликации и долгосрочной гарантии совместимости форматов пока нет.
+```mermaid
+flowchart LR
+    A["Put · Delete · Inc · ApplyOnce"] --> W["WAL с checksum"]
+    W --> R["Маршрутизатор ключей"]
+    R --> L1["Лист A<br/>buffer + segment"]
+    R --> L2["Лист B<br/>buffer + segment"]
+    R --> L3["Лист C<br/>buffer + segment"]
+    M["Адаптивный планировщик"] -. "запуск / пауза" .-> L1
+    M -. "запуск / пауза" .-> L2
+    T["p95/p99 · CPU · disk · RAM"] --> M
+```
+
+Планировщик учитывает текущую нагрузку, p95/p99, CPU, диск, память,
+maintenance debt и выученный недельный профиль. В нём нет жёсткого правила
+«обучаться ночью»: тяжёлая работа запускается при устойчиво низкой нагрузке и
+сокращается или прерывается во время спайка.
+
+## Реализовано
+
+| Область | Текущий контракт |
+|---|---|
+| Point API | Конкурентные `Get`, `Put`, `Delete` и атомарный `int64` `Inc` |
+| События | Условные multi-key batches и идемпотентный `ApplyOnce` одним WAL-record |
+| Durability | Checksummed WAL, group commit, точные replay watermarks и crash recovery |
+| Хранение | Immutable-сегменты, bloom filter, локальные merge/split, LZ4-словари |
+| Планирование | Admission и preemption по latency, CPU, disk, RAM и истории нагрузки |
+| Эксплуатация | Verify, backup/restore, Prometheus, Grafana и format negotiation |
+| Проверка | Race, fault injection, process-kill crash matrix, fuzz и phased qualification |
+
+Scope пока намеренно ограничен одной локальной базой, point-операциями и
+атомарными write batches. Range scan, общих read/write-транзакций, репликации и
+долгосрочной гарантии совместимости форматов пока нет.
 
 ## Установка
 
-Нужны Go 1.25.13+, C toolchain и нативная development-библиотека LZ4. Для
-Debian/Ubuntu: `apt install liblz4-dev`, для macOS: `brew install lz4`. Сборка
-с `CGO_ENABLED=0` компилируется, но dictionary codec и адаптивное обучение
-возвращают `fusedb.ErrCGODisabled`.
+Нужны Go 1.25.13+, C toolchain и development-библиотека LZ4.
 
 ```bash
+# Debian / Ubuntu
+sudo apt-get install liblz4-dev
+
+# macOS
+brew install lz4
+
 go get github.com/uchebnick/fusedb/pkg/fusedb@latest
 ```
+
+Сборка с `CGO_ENABLED=0` работает, но dictionary codec и обучение словарей
+возвращают `fusedb.ErrCGODisabled`.
 
 ## Быстрый старт
 
@@ -91,10 +99,11 @@ import (
 )
 
 func main() {
-    db, err := fusedb.Open(fusedb.Options{Dir: "./data"})
+    db, err := fusedb.Open(fusedb.DurablePilotOptions("./data"))
     if err != nil {
         log.Fatal(err)
     }
+    defer db.Close()
 
     if err := db.Put([]byte("user:42"), []byte("Ada")); err != nil {
         log.Fatal(err)
@@ -107,103 +116,88 @@ func main() {
     if found {
         log.Printf("user:42 = %s", value)
     }
-
-    if err := db.Close(); err != nil {
-        log.Fatal(err)
-    }
 }
 ```
 
-`DB` безопасно использовать конкурентно. `Put`, `Delete` и `Inc` отвергают
-пустые ключи; для `Get` пустой ключ считается отсутствующим. Настройки и
-гарантии durability описаны в [руководстве по библиотеке](./LIBRARY.md).
+`DB` безопасна для конкурентного использования. Записи копируют
+caller-owned bytes, чтения возвращают независимые копии.
 
-## Как это работает
+## Идемпотентные события
 
-```text
-Put / Delete / Inc
-        │
-        ├── запись в WAL
-        ▼
- маршрутизация в лист ───► изменяемый skiplist-буфер
-                                  │
-                                  │ merge по порогу
-                                  ▼
-Get ─► лист ─► буфер ─────► иммутабельный сегмент
-                              bloom → index → block
+Повторная доставка события может атомарно обновить membership и шардированный
+счётчик без двойного применения:
+
+```go
+applied, err := db.ApplyOnceIf(
+    []byte("event:like:evt-123"),
+    []fusedb.Condition{
+        fusedb.KeyAbsent([]byte("like:post-7:user-42")),
+    },
+    []fusedb.Mutation{
+        fusedb.PutMutation([]byte("like:post-7:user-42"), []byte{1}),
+        fusedb.IncMutation([]byte("likes:post-7:shard-12"), 1),
+    },
+)
 ```
 
-Упорядоченный набор листьев публикуется по принципу copy-on-write. Лист владеет
-полуоткрытым диапазоном ключей, in-memory буфером мутаций и не более чем одним
-иммутабельным сегментом. Когда лист перерастает `MaxLeafSize`, следующий merge
-создаёт несколько листьев и публикует их атомарно. Инварианты конкурентности и
-восстановления разобраны в [описании архитектуры](./ARCHITECTURE.ru.md).
+Схема ключей, retry-контракт, rebuild и rollback описаны в
+[wiki для лайков и счётчика билетов](./docs/pilot-likes-tickets.ru.md);
+[подробная английская версия](./docs/pilot-likes-tickets.md) содержит полный
+production-pilot runbook.
 
-## Режимы durability
+## Durability
 
-| Настройка | Когда завершается запись | Окно потери при сбое |
+| Режим | Когда завершается запись | Поведение при crash |
 |---|---|---|
-| `WALSyncWrites: false` (по умолчанию) | После append в WAL и применения в памяти | До одного интервала group commit (по умолчанию 200 мкс) |
-| `WALSyncWrites: true` | После coalesced group sync WAL и применения в памяти | Подтверждённые WAL-записи намеренно не остаются несинхронизированными |
+| `WALSyncWrites: false` | После WAL append и публикации в памяти | Может потеряться последнее окно group commit |
+| `WALSyncWrites: true` | После coalesced filesystem sync WAL | Успешные WAL-record намеренно не остаются unsynced |
 
-`Close` и `Merge` переносят буферизованные операции в сегменты. У каждого листа
-есть собственный точный replay watermark: локальный merge не может повторно
-применить `Inc`. Глобальный `AppliedSeq` остаётся минимумом по листьям и задаёт
-безопасную границу truncation WAL.
+`DurablePilotOptions` включает sync WAL, оставляет headroom железу, собирает
+latency и отключает runtime-обучение словарей до qualification на целевой
+машине.
 
-## Мониторинг
+## Сравнительные бенчмарки
 
-`DB.Health`, `DB.Metrics`, `DB.Stats` и `DB.Format` возвращают иммутабельные
-in-process snapshots. Опциональный пакет `pkg/fusedb/prometheus` преобразует их
-в custom collector без глобальной регистрации и persistent I/O во время
-scrape. Готовый пример `/metrics` и `/readyz`, recording rules и alerts находятся
-в [Prometheus operations bundle](./monitoring/prometheus/README.md).
+В репозитории остался один воспроизводимый harness для FuseDB, Pebble, Badger и
+нативного RocksDB. Он разделяет `async` и `sync`, запускает одинаковые
+детерминированные workloads и сохраняет versioned JSON вместе с Markdown.
 
-## Снимок производительности
+```bash
+make benchmark-quick
 
-Apple M4, `darwin/arm64`, значения по 128 байт, 64K заранее созданных ключей,
-кэш 5 MiB. Pebble работает с `NoSync`, поэтому это сравнение задержки, а не
-эквивалентной per-write durability. Указан диапазон трёх прогонов.
+# Нужны librocksdb и pkg-config.
+make benchmark-rocksdb
+```
 
-| Операция | FuseDB | Pebble (`NoSync`) |
-|---|---:|---:|
-| Точечное чтение | `1.06–1.13 мкс` | `4.25–4.39 мкс` |
-| Запись | `1.03 мкс` | `0.83–0.88 мкс` |
-| Открытие + первое чтение | `7.4–7.8 мс` | `26.3–26.6 мс` |
-| Атомарный инкремент | `407–482 нс` | — |
+Читайте [методологию](./benchmarks/README.md) перед
+[результатами](./benchmarks/RESULTS.md): короткий hot-key benchmark не
+проверяет recovery, backups, долгие compaction stalls или зрелость продукта.
 
-Это результат одной машины и одного workload, а не универсальный рейтинг.
-Команды, данные и результаты write amplification находятся в
-[benchmarks/RESULTS.md](./benchmarks/RESULTS.md).
+## Документация
 
-## Структура репозитория
-
-| Путь | Ответственность |
+| Раздел | Содержание |
 |---|---|
-| `pkg/fusedb` | Поддерживаемый публичный API |
-| `pkg/fusedb/prometheus` | Опциональный низкокардинальный Prometheus collector |
-| `internal/tree` | Маршрутизация, набор листьев, split и обновление manifest |
-| `internal/leaf` | Буфер, reader, merge и split одного листа |
-| `internal/skiplist` | Упорядоченный in-memory индекс мутаций |
-| `internal/segment` | Формат и чтение/запись иммутабельных сегментов |
-| `internal/wal` | WAL, replay, group commit и truncation |
-| `internal/manifest` | Каталог листьев, группы словарей и replay watermarks |
-| `internal/dbformat` | Epoch дискового формата, feature negotiation и compatibility gate |
-| `internal/compression` | LZ4, адаптивное обучение, registry и каталог групп |
-| `internal/metrics` | Переиспользуемые метрики latency, фоновых задач, CPU, disk и RAM |
-| `internal/scheduler` | Адаптивный admission и прерывание фоновых задач |
-| `internal/backup` | Потоковый формат backup и безопасное восстановление |
-| `internal/disk` | Абстракция файловой системы и атомарные файловые операции |
-| `monitoring` | Prometheus rules, Grafana dashboard, alerts и руководство интеграции |
-| `cmd/fusedb-qualify` | Phased qualification целевого железа и JSON evidence |
-| `benchmarks` | Отдельный Go module для воспроизводимых сравнений и результатов |
+| [Library guide](./LIBRARY.md) | API, настройки, ownership и ошибки |
+| [Архитектура](./ARCHITECTURE.ru.md) | Модель хранения и инварианты конкурентности |
+| [Планировщик](./docs/scheduler.md) | Нагрузка, admission, preemption и resource budgets |
+| [Compression](./docs/compression.md) | Группы словарей, обучение, оценка и GC |
+| [Operations](./docs/operations.md) | Monitoring, backup, readiness и incidents |
+| [Qualification](./docs/qualification.md) | Проверка нагрузки и recovery на целевом железе |
+| [Disk format](./docs/format.md) | Epoch, feature bits и миграции |
+| [Benchmarks](./benchmarks/README.md) | Честное сравнение движков |
 
-## Состояние проекта
+Полный каталог находится в [docs/README.md](./docs/README.md).
 
-Сейчас FuseDB подходит для исследований storage engine и экспериментов. До
-production-релиза нужны долгосрочная политика поддержки форматов, более широкие
-power-loss и target-filesystem fault-кампании, регулярные backup/restore drills
-и проверка на production-железе. Текущая готовность честно описана в
-[руководстве по эксплуатации](./docs/operations.md). Правила разработки — в
-[CONTRIBUTING.md](./CONTRIBUTING.md). Поддерживаемые runtime-платформы — Linux
-и macOS; точный контракт описан в [release guide](./docs/release.md).
+## Разработка
+
+```bash
+make check
+make test-crash
+make test-fuzz
+make security
+make test-benchmarks
+```
+
+Правила разработки и focused tests находятся в
+[CONTRIBUTING.md](./CONTRIBUTING.md), security policy — в
+[SECURITY.md](./SECURITY.md). Лицензия — [MIT](./LICENSE).

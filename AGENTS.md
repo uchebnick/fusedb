@@ -43,7 +43,7 @@ The engine partitions the keyspace into leaves. Each leaf owns a mutable buffer 
 - `internal/segment` owns immutable block/segment format and segment readers/writers.
 - `internal/compression` owns compression, dictionary training, and dictionary registries.
 - `internal/disk` owns filesystem abstractions and atomic file operations.
-- `pkg/fusedb` is the public API. `pkg/oneleafdb` is the engine behind it and is not the supported entry point.
+- `pkg/fusedb` is the public API. `internal/engine` is the engine behind it and is not the supported entry point.
 
 ## Testing Notes
 

@@ -1,39 +1,39 @@
 package fusedb
 
-import "github.com/uchebnick/fusedb/pkg/oneleafdb"
+import "github.com/uchebnick/fusedb/internal/engine"
 
 // Condition is a transaction precondition. Construct values with KeyAbsent
 // and KeyPresent.
 type Condition struct {
-	inner oneleafdb.Condition
+	inner engine.Condition
 }
 
 // KeyAbsent requires key to be missing when the transaction commits.
 func KeyAbsent(key []byte) Condition {
-	return Condition{inner: oneleafdb.KeyAbsent(key)}
+	return Condition{inner: engine.KeyAbsent(key)}
 }
 
 // KeyPresent requires key to exist when the transaction commits.
 func KeyPresent(key []byte) Condition {
-	return Condition{inner: oneleafdb.KeyPresent(key)}
+	return Condition{inner: engine.KeyPresent(key)}
 }
 
 // Mutation is one member of an atomic transaction. Construct values with
 // PutMutation, DeleteMutation, and IncMutation.
 type Mutation struct {
-	inner oneleafdb.Mutation
+	inner engine.Mutation
 }
 
 func PutMutation(key, value []byte) Mutation {
-	return Mutation{inner: oneleafdb.PutMutation(key, value)}
+	return Mutation{inner: engine.PutMutation(key, value)}
 }
 
 func DeleteMutation(key []byte) Mutation {
-	return Mutation{inner: oneleafdb.DeleteMutation(key)}
+	return Mutation{inner: engine.DeleteMutation(key)}
 }
 
 func IncMutation(key []byte, delta int64) Mutation {
-	return Mutation{inner: oneleafdb.IncMutation(key, delta)}
+	return Mutation{inner: engine.IncMutation(key, delta)}
 }
 
 // Apply atomically evaluates conditions and commits mutations. It returns
@@ -41,11 +41,11 @@ func IncMutation(key []byte, delta int64) Mutation {
 // written as one checksummed WAL record and are never partially visible to
 // concurrent public API calls.
 func (db *DB) Apply(conditions []Condition, mutations []Mutation) (applied bool, err error) {
-	convertedConditions := make([]oneleafdb.Condition, len(conditions))
+	convertedConditions := make([]engine.Condition, len(conditions))
 	for index, condition := range conditions {
 		convertedConditions[index] = condition.inner
 	}
-	convertedMutations := make([]oneleafdb.Mutation, len(mutations))
+	convertedMutations := make([]engine.Mutation, len(mutations))
 	for index, mutation := range mutations {
 		convertedMutations[index] = mutation.inner
 	}
@@ -64,11 +64,11 @@ func (db *DB) ApplyOnce(idempotencyKey []byte, mutations []Mutation) (applied bo
 // preconditions. The first evaluation is remembered even when a condition is
 // false, so a delayed retry cannot mutate newer state.
 func (db *DB) ApplyOnceIf(idempotencyKey []byte, conditions []Condition, mutations []Mutation) (applied bool, err error) {
-	convertedConditions := make([]oneleafdb.Condition, len(conditions))
+	convertedConditions := make([]engine.Condition, len(conditions))
 	for index, condition := range conditions {
 		convertedConditions[index] = condition.inner
 	}
-	converted := make([]oneleafdb.Mutation, len(mutations))
+	converted := make([]engine.Mutation, len(mutations))
 	for index, mutation := range mutations {
 		converted[index] = mutation.inner
 	}

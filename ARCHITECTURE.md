@@ -33,7 +33,7 @@ on-disk segment. Each leaf merges independently, so the volume rewritten by one
 merge is bounded by the leaf size rather than by the size of the database.
 
 The supported public entry point is `pkg/fusedb` (`DB`, `Open`).
-`pkg/oneleafdb` is the engine behind that facade and is not a stable API.
+`internal/engine` is the engine behind that facade and is not a stable API.
 
 ### Core Components
 
@@ -79,7 +79,7 @@ format snapshots. It performs no storage I/O during scrape, uses only fixed
 label enumerations, and leaves registration lifecycle to the embedding
 application. Prometheus rules and the Grafana dashboard live under `monitoring`.
 
-**Cache** (`pkg/oneleafdb/cache.go`)
+**Cache** (`internal/engine/cache.go`)
 Map-based value cache with sharded epoch invalidation. Evicts arbitrary entries
 when the byte budget is exceeded.
 
@@ -293,11 +293,13 @@ Code path: `Reader.Get`, `Reader.readBlockValue`, `BlockView.Find`.
 
 ## Compression System
 
-Files: `internal/compression/dict.go`, `dict_file.go`
+Files: `internal/compression`, `internal/engine/dictionary_training.go`
 
-Compression is optional and segment-wide. `OpenDB` uses `CompressionNone` unless
-a dictionary is passed in `DBOptions.Dictionary`, in which case every block of
-every newly written segment is compressed with `CompressionLZ4Dict`.
+Compression is optional and segment-wide. A supplied dictionary seeds the
+default dictionary group. Runtime training can also collect bounded samples
+from real merged blocks, train one immutable LZ4 dictionary per leaf group,
+evaluate it on held-out samples, and publish it only when the configured gain
+threshold is met.
 
 ### Dictionary Training
 
@@ -310,11 +312,14 @@ raw, err = dictbuilder.BuildRawDict(samples, dictbuilder.Options{
 })
 ```
 
-Training extracts common patterns from sample data. On the corpus and machine
-recorded in `benchmarks/RESULTS.md` (dated 2026-05-11, before the leaf tree
-rewrite), the 4 KiB LZ4 dictionary saved 62.6% of block bytes.
+Training extracts common patterns from sample data. Its compression gain is
+data-dependent, so the scheduler evaluates each candidate against held-out
+samples instead of relying on a repository-wide historical ratio. Training,
+evaluation, publication, and reference-safe GC are bounded and cooperatively
+preemptible background jobs.
 
-Code path: `TrainDictionary`.
+Code paths: `TrainDictionary`, `dictionaryTrainer`, and the dictionary group
+catalog.
 
 ### Persistence Format
 
@@ -855,7 +860,7 @@ per-leaf goroutine a tree of thousands of leaves would otherwise need.
 
 ## Recovery and Checkpoints
 
-File: `pkg/oneleafdb/db.go`
+File: `internal/engine/db.go`
 
 ### Opening a Database
 
@@ -956,7 +961,7 @@ may still use bounded repeat rounds when no exact snapshot boundary is claimed.
 
 ## Cache Layer
 
-File: `pkg/oneleafdb/cache.go`
+File: `internal/engine/cache.go`
 
 ### Structure
 

@@ -1,4 +1,4 @@
-.PHONY: all check check-format test test-nocgo test-benchmarks test-crash test-fuzz test-monitoring test-qualification qualification test-coverage bench bench-latency bench-ycsb security vulncheck license-check sbom lint fmt clean build tidy ci help
+.PHONY: all check check-format test test-nocgo test-benchmarks test-crash test-fuzz test-monitoring test-qualification qualification test-coverage benchmark benchmark-quick benchmark-standard benchmark-rocksdb security vulncheck license-check sbom lint fmt clean build tidy ci help
 
 FUZZTIME ?= 5s
 PROMETHEUS_IMAGE ?= prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
@@ -6,6 +6,11 @@ GOVULNCHECK_VERSION ?= v1.7.0
 GO_LICENSES_VERSION ?= v2.0.1
 CYCLONEDX_GOMOD_VERSION ?= v1.10.0
 SBOM_DIR ?= dist
+BENCH_PROFILE ?= quick
+BENCH_ENGINES ?=
+BENCH_TAGS ?=
+BENCH_ARGS ?=
+BENCH_OUTPUT ?= results/latest
 GO_FILES := $(shell git ls-files -co --exclude-standard -- '*.go' | while IFS= read -r file; do test ! -f "$$file" || printf '%s\n' "$$file"; done)
 
 all: check
@@ -27,7 +32,7 @@ test-benchmarks:
 	cd benchmarks && go test ./...
 
 test-crash:
-	go test -run='^TestProcessCrashMatrix$$' -count=3 -timeout=5m ./pkg/oneleafdb
+	go test -run='^TestProcessCrashMatrix$$' -count=3 -timeout=5m ./internal/engine
 
 test-fuzz:
 	go test -run='^$$' -fuzz=FuzzSegmentMetadataDecodersNeverPanic -fuzztime=$(FUZZTIME) ./internal/segment
@@ -65,14 +70,24 @@ qualification:
 test-coverage: test
 	go tool cover -html=coverage.txt -o coverage.html
 
-bench:
-	cd benchmarks && go test -run=^$$ -bench=. -benchmem -benchtime=2s ./oneleafdb
+benchmark:
+	mkdir -p benchmarks/results
+	cd benchmarks && go run $(if $(BENCH_TAGS),-tags $(BENCH_TAGS)) ./cmd/kvbench \
+		-profile "$(BENCH_PROFILE)" \
+		$(if $(BENCH_ENGINES),-engines "$(BENCH_ENGINES)") \
+		-json "$(BENCH_OUTPUT).json" \
+		-markdown "$(BENCH_OUTPUT).md" $(BENCH_ARGS)
 
-bench-latency:
-	cd benchmarks && FUSEDB_LATENCY_PROBE=1 go test -run=Latency -v ./oneleafdb
+benchmark-quick: BENCH_PROFILE=quick
+benchmark-quick: benchmark
 
-bench-ycsb:
-	cd benchmarks && FUSEDB_REAL_YCSB=1 go test -run=GoYCSB -v ./oneleafdb
+benchmark-standard: BENCH_PROFILE=standard
+benchmark-standard: benchmark
+
+benchmark-rocksdb: BENCH_PROFILE=quick
+benchmark-rocksdb: BENCH_ENGINES=all
+benchmark-rocksdb: BENCH_TAGS=rocksdb
+benchmark-rocksdb: benchmark
 
 lint:
 	golangci-lint run --timeout=5m
@@ -111,9 +126,9 @@ help:
 	@echo "  vulncheck        - Scan reachable production code with govulncheck"
 	@echo "  license-check    - Reject forbidden, restricted, or unknown licenses"
 	@echo "  sbom             - Generate a deterministic CycloneDX library SBOM"
-	@echo "  bench            - Run benchmarks"
-	@echo "  bench-latency    - Run latency probes"
-	@echo "  bench-ycsb       - Run YCSB workloads"
+	@echo "  benchmark-quick  - Compare FuseDB, Pebble, and Badger with the quick profile"
+	@echo "  benchmark-standard - Run the longer repeated comparison profile"
+	@echo "  benchmark-rocksdb - Include the native RocksDB adapter (requires pkg-config)"
 	@echo "  lint             - Run linter"
 	@echo "  fmt              - Format code"
 	@echo "  clean            - Clean artifacts"

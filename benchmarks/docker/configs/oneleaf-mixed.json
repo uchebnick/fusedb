@@ -1,9 +1,0 @@
-{
-  "engine": "oneleaf",
-  "record_count": 100000,
-  "operation_count": 500000,
-  "value_size": 1024,
-  "cache_size_mb": 64,
-  "workers": 1,
-  "workload": "mixed-50-50"
-}

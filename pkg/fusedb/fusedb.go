@@ -43,11 +43,11 @@ import (
 	"github.com/uchebnick/fusedb/internal/compression"
 	"github.com/uchebnick/fusedb/internal/dbformat"
 	"github.com/uchebnick/fusedb/internal/disk"
+	"github.com/uchebnick/fusedb/internal/engine"
 	enginemetrics "github.com/uchebnick/fusedb/internal/metrics"
 	"github.com/uchebnick/fusedb/internal/scheduler"
 	"github.com/uchebnick/fusedb/internal/tree"
 	"github.com/uchebnick/fusedb/internal/value"
-	"github.com/uchebnick/fusedb/pkg/oneleafdb"
 )
 
 // ErrEmptyKey is returned by Put, Delete, and Inc for a zero-length key.
@@ -59,11 +59,11 @@ var ErrEmptyKey = tree.ErrEmptyKey
 
 // ErrKeyTooLarge and ErrValueTooLarge reject mutations above the hard
 // persisted-data limits before anything is appended to the WAL.
-var ErrKeyTooLarge = oneleafdb.ErrKeyTooLarge
-var ErrValueTooLarge = oneleafdb.ErrValueTooLarge
+var ErrKeyTooLarge = engine.ErrKeyTooLarge
+var ErrValueTooLarge = engine.ErrValueTooLarge
 
-const MaxKeySize = oneleafdb.MaxKeyBytes
-const MaxValueSize = oneleafdb.MaxValueBytes
+const MaxKeySize = engine.MaxKeyBytes
+const MaxValueSize = engine.MaxValueBytes
 
 // ErrInvalidBackup reports an unsupported or structurally invalid archive.
 var ErrInvalidBackup = backup.ErrInvalidArchive
@@ -76,40 +76,40 @@ var ErrRestoreDestinationNotEmpty = backup.ErrDestinationNotEmpty
 
 // ErrDatabaseLocked is returned when another FuseDB instance already owns the
 // same database directory.
-var ErrDatabaseLocked = oneleafdb.ErrDatabaseLocked
+var ErrDatabaseLocked = engine.ErrDatabaseLocked
 
 // ErrCorruption is returned by Verify when persisted state violates a
 // checksum, ordering, range, dictionary, manifest, or WAL invariant.
-var ErrCorruption = oneleafdb.ErrCorruption
+var ErrCorruption = engine.ErrCorruption
 
 // ErrSchedulerModelPersistence reports that optional learned scheduler history
 // could not be saved. User data durability is unaffected.
-var ErrSchedulerModelPersistence = oneleafdb.ErrSchedulerModelPersistence
+var ErrSchedulerModelPersistence = engine.ErrSchedulerModelPersistence
 
 // ErrFormatTooNew and ErrFormatTooOld reject a database whose declared
 // compatibility epoch cannot be safely opened by this binary.
-var ErrFormatTooNew = oneleafdb.ErrFormatTooNew
-var ErrFormatTooOld = oneleafdb.ErrFormatTooOld
+var ErrFormatTooNew = engine.ErrFormatTooNew
+var ErrFormatTooOld = engine.ErrFormatTooOld
 
 // ErrUnknownRequiredFeature rejects a database using a mandatory feature this
 // binary does not understand. Unknown optional features remain readable.
-var ErrUnknownRequiredFeature = oneleafdb.ErrUnknownRequiredFeature
+var ErrUnknownRequiredFeature = engine.ErrUnknownRequiredFeature
 
 // ErrMissingRequiredFeature rejects a descriptor that omits a feature every
 // database in its declared epoch must use.
-var ErrMissingRequiredFeature = oneleafdb.ErrMissingRequiredFeature
+var ErrMissingRequiredFeature = engine.ErrMissingRequiredFeature
 
 // ErrFormatMismatch reports that FORMAT and required database files disagree.
-var ErrFormatMismatch = oneleafdb.ErrFormatMismatch
+var ErrFormatMismatch = engine.ErrFormatMismatch
 
 // ErrFormatCorrupt and ErrFormatCodec report an invalid or unsupported FORMAT
 // descriptor before any database files are mutated.
-var ErrFormatCorrupt = oneleafdb.ErrFormatCorrupt
-var ErrFormatCodec = oneleafdb.ErrFormatCodec
+var ErrFormatCorrupt = engine.ErrFormatCorrupt
+var ErrFormatCodec = engine.ErrFormatCodec
 
 // ErrWALPersistence reports a terminal WAL write or sync failure. Stop using
 // the handle, close it, and reopen before retrying or reconciling the mutation.
-var ErrWALPersistence = oneleafdb.ErrWALPersistence
+var ErrWALPersistence = engine.ErrWALPersistence
 
 // ErrCGODisabled reports that an operation requiring the native LZ4
 // dictionary codec was attempted in a binary built with CGO disabled.
@@ -142,15 +142,15 @@ var ErrValueType = value.ErrKindMismatch
 
 // ErrIdempotencyConflict reports reuse of an ApplyOnce key for a different
 // ordered mutation set. The original transaction remains unchanged.
-var ErrIdempotencyConflict = oneleafdb.ErrIdempotencyConflict
+var ErrIdempotencyConflict = engine.ErrIdempotencyConflict
 
-var ErrEmptyTransaction = oneleafdb.ErrEmptyTransaction
-var ErrTooManyMutations = oneleafdb.ErrTooManyMutations
-var ErrDuplicateMutationKey = oneleafdb.ErrDuplicateMutationKey
+var ErrEmptyTransaction = engine.ErrEmptyTransaction
+var ErrTooManyMutations = engine.ErrTooManyMutations
+var ErrDuplicateMutationKey = engine.ErrDuplicateMutationKey
 
 // DB is an embedded key-value database safe for concurrent use.
 type DB struct {
-	db *oneleafdb.DB
+	db *engine.DB
 }
 
 // Options configures a FuseDB instance.
@@ -309,7 +309,7 @@ func Open(opts Options) (*DB, error) {
 		}
 	}
 
-	db, err := oneleafdb.OpenDB(oneleafdb.DBOptions{
+	db, err := engine.OpenDB(engine.DBOptions{
 		Dir:                    opts.Dir,
 		ThresholdBytes:         opts.MergeSize,
 		MaxLeafBytes:           opts.MaxLeafSize,
@@ -346,7 +346,7 @@ func Open(opts Options) (*DB, error) {
 			SampleInterval:     opts.Scheduler.PollInterval,
 		},
 		DisableSchedulerModelPersistence: opts.Scheduler.DisableModelPersistence,
-		DictionaryTraining: oneleafdb.DictionaryTrainingConfig{
+		DictionaryTraining: engine.DictionaryTrainingConfig{
 			Disabled:                 opts.DictionaryTraining.Disabled,
 			GroupLeaves:              opts.DictionaryTraining.GroupLeaves,
 			DictionarySize:           opts.DictionaryTraining.DictionarySize,
@@ -359,7 +359,7 @@ func Open(opts Options) (*DB, error) {
 			MaxTotalSampleBytes:      opts.DictionaryTraining.MaxTotalSampleBytes,
 			MinimumGain:              opts.DictionaryTraining.MinimumGain,
 		},
-		DictionaryGC: oneleafdb.DictionaryGCConfig{
+		DictionaryGC: engine.DictionaryGCConfig{
 			Disabled:       opts.DictionaryGC.Disabled,
 			MaxFilesPerRun: opts.DictionaryGC.MaxFilesPerRun,
 		},
@@ -486,7 +486,7 @@ func Restore(ctx context.Context, archivePath, destination string) (BackupReport
 		return BackupReport{}, err
 	}
 
-	restored, err := oneleafdb.OpenDB(oneleafdb.DBOptions{Dir: destination})
+	restored, err := engine.OpenDB(engine.DBOptions{Dir: destination})
 	if err != nil {
 		if errors.Is(err, ErrFormatTooNew) || errors.Is(err, ErrFormatTooOld) ||
 			errors.Is(err, ErrUnknownRequiredFeature) || errors.Is(err, ErrMissingRequiredFeature) ||
@@ -525,26 +525,26 @@ func Restore(ctx context.Context, archivePath, destination string) (BackupReport
 }
 
 // VerifyReport summarizes persisted state covered by a successful scan.
-type VerifyReport = oneleafdb.VerifyReport
+type VerifyReport = engine.VerifyReport
 
 // FormatInfo describes the persisted database compatibility contract.
-type FormatInfo = oneleafdb.FormatInfo
+type FormatInfo = engine.FormatInfo
 
 // BackupReport describes a durable backup or successful restore.
-type BackupReport = oneleafdb.BackupReport
+type BackupReport = engine.BackupReport
 
 // DictionaryGCReport describes one dictionary lifecycle cleanup pass.
-type DictionaryGCReport = oneleafdb.DictionaryGCReport
+type DictionaryGCReport = engine.DictionaryGCReport
 
 // HealthStatus is a point-in-time readiness view. A terminal error fences the
 // current handle until close and reopen.
-type HealthStatus = oneleafdb.HealthStatus
+type HealthStatus = engine.HealthStatus
 
 // Health reports whether this database handle may accept foreground traffic.
 // It is safe to call from a readiness endpoint and performs no filesystem I/O.
 func (db *DB) Health() HealthStatus {
 	if db == nil || db.db == nil {
-		return oneleafdb.HealthStatus{CheckedAt: time.Now(), Closed: true}
+		return engine.HealthStatus{CheckedAt: time.Now(), Closed: true}
 	}
 	return db.db.Health()
 }

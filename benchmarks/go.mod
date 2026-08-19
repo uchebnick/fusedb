@@ -3,20 +3,14 @@ module github.com/uchebnick/fusedb/benchmarks
 go 1.25.13
 
 require (
+	github.com/HdrHistogram/hdrhistogram-go v1.1.2
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/dgraph-io/badger/v4 v4.9.1
-	github.com/golang/snappy v0.0.4
-	github.com/klauspost/compress v1.18.7
-	github.com/linxGnu/grocksdb v1.10.8
-	github.com/magiconair/properties v1.8.6
-	github.com/pingcap/go-ycsb v1.0.3
-	github.com/prometheus/client_golang v1.15.0
 	github.com/uchebnick/fusedb v0.0.0
 )
 
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
-	github.com/HdrHistogram/hdrhistogram-go v1.1.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cockroachdb/errors v1.11.3 // indirect
@@ -31,18 +25,20 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
+	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
-	github.com/mattn/go-runewidth v0.0.9 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
-	github.com/olekukonko/tablewriter v0.0.5 // indirect
 	github.com/pingcap/errors v0.11.5-0.20211224045212-9687c2b0f87c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/prometheus/client_golang v1.15.0 // indirect
 	github.com/prometheus/client_model v0.4.0 // indirect
 	github.com/prometheus/common v0.42.0 // indirect
 	github.com/prometheus/procfs v0.9.0 // indirect
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/otel v1.37.0 // indirect
 	go.opentelemetry.io/otel/metric v1.37.0 // indirect

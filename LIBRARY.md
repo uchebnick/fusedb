@@ -1,7 +1,7 @@
 # FuseDB library guide
 
 This guide covers the supported API in `pkg/fusedb`. The package in
-`pkg/oneleafdb` is an implementation detail and may change without notice.
+`internal/engine` is an implementation detail and may change without notice.
 
 ## Installation
 

@@ -1,0 +1,67 @@
+name: Comparative benchmarks
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Benchmark profile
+        required: true
+        type: choice
+        default: quick
+        options:
+        - quick
+        - standard
+
+jobs:
+  kvbench:
+    name: FuseDB vs Pebble vs Badger vs RocksDB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25.13'
+        cache: true
+        cache-dependency-path: |
+          go.sum
+          benchmarks/go.sum
+
+    - name: Install native libraries
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y liblz4-dev librocksdb-dev pkg-config
+
+    - name: Build adapters
+      run: |
+        cd benchmarks
+        go test ./...
+        go test -tags rocksdb ./kvbench ./cmd/kvbench
+
+    - name: Run comparison
+      env:
+        PROFILE: ${{ inputs.profile }}
+      run: |
+        mkdir -p benchmarks/results
+        cd benchmarks
+        go run -tags rocksdb ./cmd/kvbench \
+          -profile "$PROFILE" \
+          -engines all \
+          -json results/ci.json \
+          -markdown results/ci.md
+
+    - name: Upload raw report
+      uses: actions/upload-artifact@v4
+      with:
+        name: kvbench-${{ inputs.profile }}-${{ github.sha }}
+        path: |
+          benchmarks/results/ci.json
+          benchmarks/results/ci.md
+        if-no-files-found: error

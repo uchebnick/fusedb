@@ -40,3 +40,7 @@ example-data/
 
 # Generated release artifacts
 dist/
+
+# Local benchmark artifacts. Dated evidence may still be committed explicitly.
+benchmarks/results/latest.json
+benchmarks/results/latest.md
